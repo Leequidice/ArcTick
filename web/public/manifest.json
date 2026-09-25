@@ -1,0 +1,6 @@
+{
+  "name": "ArcTick", "short_name": "ArcTick", "start_url": "/", "display": "standalone",
+  "background_color": "#090b10", "theme_color": "#090b10",
+  "description": "Swipe through short-window crypto price markets on Arc.",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

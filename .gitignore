@@ -1,0 +1,14 @@
+.env
+.env.testnet
+cache/
+out/
+broadcast/
+.tools/
+node_modules/
+web/node_modules/
+web/dist/
+web/.npm-cache/
+web/tsconfig.tsbuildinfo
+logs/
+data/
+run/
