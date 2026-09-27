@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "npm run start:api",
+    "start": "node --import tsx services/main.mjs",
+    "start:combined": "node --import tsx services/main.mjs",
     "start:api": "node --import tsx services/start-api.mjs",
     "start:keeper": "node --import tsx services/keeper.ts",
     "keeper": "node --import tsx services/keeper.ts",
