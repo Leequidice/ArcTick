@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "npm run start:api",
-    "start:api": "node --import tsx services/api.ts",
+    "start:api": "node --import tsx services/start-api.mjs",
     "start:keeper": "node --import tsx services/keeper.ts",
     "keeper": "node --import tsx services/keeper.ts",
     "keeper:stop": "node --import tsx services/keeper-stop.ts",
