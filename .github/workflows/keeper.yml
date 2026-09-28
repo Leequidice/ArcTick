@@ -25,7 +25,6 @@ jobs:
       INTERNAL_KEEPER_SECRET: ${{ secrets.INTERNAL_KEEPER_SECRET }}
       SETTLEMENT_API_URL: https://arctick.vercel.app/api/settle
       KEEPER_RUN_ONCE: "true"
-      KEEPER_PID_FILE: ${{ runner.temp }}/arctick-keeper.pid
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,4 +42,6 @@ jobs:
           done
       - run: npm ci
       - name: Resolve markets and request API settlement
+        env:
+          KEEPER_PID_FILE: ${{ runner.temp }}/arctick-keeper.pid
         run: npm run keeper:once
