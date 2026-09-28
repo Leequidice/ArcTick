@@ -139,6 +139,7 @@ app.post("/settle", async (req, res) => {
 
 type Comment = { id: string; userId: string; address: string; text: string; createdAt: string };
 const marketCacheTtlMs = Number(process.env.MARKETS_CACHE_TTL_MS ?? 4_000);
+const multicall3Address = "0xca11bde05977b3631167028862be2a173976ca11" as Address;
 let marketCache: { expiresAt: number; value: unknown } | undefined;
 let marketCachePending: Promise<unknown> | undefined;
 const amount = (value: string | number) => typeof value === "string" ? BigInt(value) : parseUnits(String(value), 6);
@@ -158,8 +159,8 @@ const slots: Slot[] = Object.entries(feeds).flatMap(([symbol, feed]) => DURATION
 const slotById = new Map(slots.map(slot => [slot.slotId, slot]));
 const slotKey = (slot: Slot) => keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [slot.feed, BigInt(slot.duration)]));
 
-async function openMarketForSlot(slot: Slot) {
-  const address = await publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "latestMarketByFeedAndDuration", args: [slotKey(slot)] });
+async function openMarketForSlot(slot: Slot, knownAddress?: Address) {
+  const address = knownAddress ?? await publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "latestMarketByFeedAndDuration", args: [slotKey(slot)] });
   if (address === zeroAddress) return undefined;
   const [startTime, endTime, resolved] = await Promise.all([
     publicClient.readContract({ address, abi: marketAbi, functionName: "startTime" }),
@@ -171,19 +172,44 @@ async function openMarketForSlot(slot: Slot) {
 
 async function loadOpenMarkets() {
   const now = Math.floor(Date.now() / 1000);
-  // Each asset has three timeframe slots, but the price is shared. Fetch once
-  // per feed rather than issuing the same Chainlink read three times per refresh.
+  // Each asset has three timeframe slots, but the price is shared. Batch reads
+  // through Multicall3 to avoid provider throttling on cold feed scans.
   const uniqueFeeds = [...new Set(slots.map(slot => slot.feed))];
-  const roundResults = new Map<Address, Promise<readonly [bigint, bigint, bigint, bigint, bigint]>>();
-  await mapConcurrent(uniqueFeeds, 2, async feed => {
-    const pendingRound = publicClient.readContract({ address: feed, abi: aggregatorAbi, functionName: "latestRoundData" });
-    roundResults.set(feed, pendingRound);
-    await pendingRound.catch(() => undefined);
-  });
+  const feedIndices = new Map(uniqueFeeds.map((feed, index) => [feed, index]));
+  type BatchOutcome<T> = { status: "success"; result: T } | { status: "failure"; error: Error };
+  type RoundData = readonly [bigint, bigint, bigint, bigint, bigint];
+  let roundResults: BatchOutcome<RoundData>[] | undefined;
+  let roundBatchError: unknown;
+  let marketResults: BatchOutcome<Address>[] | undefined;
+  let marketBatchError: unknown;
+  if (chain.id === 5042) {
+    try {
+      roundResults = await publicClient.multicall({
+        contracts: uniqueFeeds.map(address => ({ address, abi: aggregatorAbi, functionName: "latestRoundData" as const })),
+        allowFailure: true,
+        multicallAddress: multicall3Address
+      }) as unknown as BatchOutcome<RoundData>[];
+    } catch (error) { roundBatchError = error; }
+    try {
+      marketResults = await publicClient.multicall({
+        contracts: slots.map(slot => ({ address: factory, abi: factoryAbi, functionName: "latestMarketByFeedAndDuration" as const, args: [slotKey(slot)] as const })),
+        allowFailure: true,
+        multicallAddress: multicall3Address
+      }) as unknown as BatchOutcome<Address>[];
+    } catch (error) { marketBatchError = error; }
+  }
   const values = await mapConcurrent(slots, 3, async slot => {
+    const index = slots.indexOf(slot);
+    const feedIndex = feedIndices.get(slot.feed)!;
+    const roundBatchItem = roundResults?.[feedIndex];
+    const marketBatchItem = marketResults?.[index];
     const [roundResult, marketResult] = await Promise.allSettled([
-      roundResults.get(slot.feed)!,
-      openMarketForSlot(slot)
+      roundResults
+        ? roundBatchItem?.status === "success" ? Promise.resolve(roundBatchItem.result) : Promise.reject(roundBatchItem?.status === "failure" ? roundBatchItem.error : roundBatchError ?? new Error("multicall_feed_read_failed"))
+        : publicClient.readContract({ address: slot.feed, abi: aggregatorAbi, functionName: "latestRoundData" }),
+        marketResults
+        ? marketBatchItem?.status === "success" ? openMarketForSlot(slot, marketBatchItem.result) : Promise.reject(marketBatchItem?.status === "failure" ? marketBatchItem.error : marketBatchError ?? new Error("multicall_market_lookup_failed"))
+        : openMarketForSlot(slot)
     ]);
     const round = roundResult.status === "fulfilled" ? roundResult.value : undefined;
     const market = marketResult.status === "fulfilled" ? marketResult.value : undefined;
