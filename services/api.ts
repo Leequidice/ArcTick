@@ -171,9 +171,18 @@ async function openMarketForSlot(slot: Slot) {
 
 async function loadOpenMarkets() {
   const now = Math.floor(Date.now() / 1000);
+  // Each asset has three timeframe slots, but the price is shared. Fetch once
+  // per feed rather than issuing the same Chainlink read three times per refresh.
+  const uniqueFeeds = [...new Set(slots.map(slot => slot.feed))];
+  const roundResults = new Map<Address, Promise<readonly [bigint, bigint, bigint, bigint, bigint]>>();
+  await mapConcurrent(uniqueFeeds, 2, async feed => {
+    const pendingRound = publicClient.readContract({ address: feed, abi: aggregatorAbi, functionName: "latestRoundData" });
+    roundResults.set(feed, pendingRound);
+    await pendingRound.catch(() => undefined);
+  });
   const values = await mapConcurrent(slots, 3, async slot => {
     const [roundResult, marketResult] = await Promise.allSettled([
-      publicClient.readContract({ address: slot.feed, abi: aggregatorAbi, functionName: "latestRoundData" }),
+      roundResults.get(slot.feed)!,
       openMarketForSlot(slot)
     ]);
     const round = roundResult.status === "fulfilled" ? roundResult.value : undefined;
