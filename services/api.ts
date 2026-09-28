@@ -9,6 +9,7 @@ import { z } from "zod";
 import { aggregatorAbi, factoryAbi, marketAbi, usdcAbi, vaultAbi } from "./abi.js";
 import { DURATIONS } from "./feeds.js";
 import { configuredFeeds } from "./network-feeds.js";
+import { evaluateChainStatus, expectedChainId, isNetworkGuardedRequest, type ChainStatus } from "./network-guard.js";
 import { isValidInternalSecret } from "./internal-auth.js";
 import { consumeWalletNonce, createGoogleUser, getOrCreateConnectedUser, getUserByAddress, getUserByGoogleSub, getUserById, initializeDatabase, pool, setWalletNonce, withOperatorTransactionLock, type User } from "./database.js";
 
@@ -22,14 +23,14 @@ const jwtSecret = new TextEncoder().encode(required("JWT_SECRET"));
 const masterKey = scryptSync(required("WALLET_MASTER_SECRET"), "arctick-wallet-v1", 32);
 required("DATABASE_URL");
 const chain = { id: Number(required("ARC_CHAIN_ID")), name: "Arc", nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 }, rpcUrls: { default: { http: [rpc] } } } as const;
+const expectedNetworkId = expectedChainId(chain.id);
 const feeds = configuredFeeds(chain.id);
 // Keep individual requests small for Arc providers. Mainnet falls back to the
 // official endpoint if a dedicated provider is temporarily unavailable.
 const rpcOptions = { timeout: 20_000, retryCount: 1 };
-function sanitizedRpcUrl() {
+function rpcHostname() {
   try {
-    const parsed = new URL(rpc);
-    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    return new URL(rpc).hostname;
   } catch {
     return "invalid_rpc_url";
   }
@@ -40,7 +41,28 @@ const publicTransport = Number(process.env.ARC_CHAIN_ID) === 5042 && rpc !== "ht
 const publicClient = createPublicClient({ chain, transport: publicTransport });
 const operatorClient = createWalletClient({ account: operator, chain, transport: http(rpc) });
 const google = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-let runtimeConfigLogged = false;
+let networkStatusPromise: Promise<ChainStatus> | undefined;
+let networkStatusLogged = false;
+
+function getNetworkStatus() {
+  if (!networkStatusPromise) {
+    networkStatusPromise = publicClient.getChainId()
+      .then(actual => evaluateChainStatus(expectedNetworkId, chain.id, actual))
+      .catch(() => evaluateChainStatus(expectedNetworkId, chain.id, null));
+  }
+  return networkStatusPromise;
+}
+
+async function logNetworkStatus(status: ChainStatus) {
+  if (networkStatusLogged) return;
+  networkStatusLogged = true;
+  console[status.matchesExpected ? "info" : "error"](JSON.stringify({
+    service: "api",
+    action: status.matchesExpected ? "network_verified" : "network_mismatch",
+    ...status,
+    rpcHostname: rpcHostname()
+  }));
+}
 
 function encrypt(value: string) { const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", masterKey, iv); const data = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]); return Buffer.concat([iv, cipher.getAuthTag(), data]).toString("base64"); }
 function decrypt(value: string) { const raw = Buffer.from(value, "base64"), decipher = createDecipheriv("aes-256-gcm", masterKey, raw.subarray(0, 12)); decipher.setAuthTag(raw.subarray(12, 28)); return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8"); }
@@ -58,14 +80,25 @@ app.use((_req, res, next) => {
   next();
 });
 app.use(express.json());
-app.get("/health", (_req, res) => res.json({ status: "ok", chainId: chain.id, rpcUrl: sanitizedRpcUrl(), feedAddresses: feeds }));
+app.use(async (req, res, next) => {
+  if (!isNetworkGuardedRequest(req.method, req.path)) return next();
+  const status = await getNetworkStatus();
+  await logNetworkStatus(status);
+  if (!status.matchesExpected) return res.status(503).json({ error: "misconfigured_network", ...status });
+  next();
+});
+app.get("/health", async (_req, res) => {
+  const status = await getNetworkStatus();
+  await logNetworkStatus(status);
+  res.json({ status: status.matchesExpected ? "ok" : "misconfigured_network", expectedChainId: status.expectedChainId, actualChainId: status.actualChainId, matchesExpected: status.matchesExpected, rpcHostname: rpcHostname() });
+});
 
 // Keeper-to-API channel only. This credential is separate from user JWTs and
 // is never returned to a client or included in logs.
 // Vercel's current build exposes this catch-all as one path segment, so keep a
 // single-segment alias for the scheduled keeper while retaining the local/API
 // route used by non-Vercel hosts.
-app.post(["/internal/settle", "/settle"], async (req, res) => {
+app.post("/settle", async (req, res) => {
   const configuredSecret = process.env.INTERNAL_KEEPER_SECRET;
   const suppliedSecret = req.header("x-keeper-secret");
   if (!configuredSecret) return res.status(503).json({ error: "internal_settlement_unconfigured" });
@@ -98,6 +131,7 @@ app.post(["/internal/settle", "/settle"], async (req, res) => {
     });
     res.json({ market: address, ...result });
   } catch (error) {
+    if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Settlement request is invalid." });
     console.error(JSON.stringify({ service: "api", action: "internal_settlement_failed", error: String(error) }));
     res.status(500).json({ error: "internal_settlement_failed" });
   }
@@ -195,6 +229,7 @@ app.post("/auth/google", async (req, res) => {
     const payload = ticket.getPayload(); if (!payload?.sub) throw new Error("Google token has no subject");
     googleSub = payload.sub;
   } catch (error) {
+    if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Google sign-in request is invalid." });
     console.error(JSON.stringify({ service: "api", action: "google_token_verification_failed", error: String(error) }));
     res.status(401).json({ error: "invalid_google_token" });
     return;
@@ -229,7 +264,10 @@ app.post("/wallet/connect", async (req, res) => {
     const authenticatedUser = await consumeWalletNonce(user.id, user.nonce);
     if (!authenticatedUser) throw new Error("nonce already used; request a fresh one");
     res.json({ token: await token(authenticatedUser), address: authenticatedUser.address, custodial: false });
-  } catch (error) { res.status(401).json({ error: "wallet_auth_failed", detail: String(error) }); }
+  } catch (error) {
+    if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Wallet connection request is invalid." });
+    res.status(401).json({ error: "wallet_auth_failed", detail: String(error) });
+  }
 });
 
 app.get("/balance", auth, async (_req, res) => { const user: User = res.locals.user; const balance = await publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "balances", args: [user.address] }); res.json({ address: user.address, balance: balance.toString(), decimals: 6 }); });
@@ -248,7 +286,10 @@ app.post("/deposit", auth, async (req, res) => {
     await publicClient.waitForTransactionReceipt({ hash: approvalHash });
     const transactionHash = await client.writeContract({ address: vault, abi: vaultAbi, functionName: "deposit", args: [value] });
     res.status(202).json({ approvalHash, transactionHash, status: "submitted" });
-  } catch (error) { res.status(400).json({ error: "deposit_failed", detail: String(error) }); }
+  } catch (error) {
+    if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Deposit request is invalid." });
+    res.status(400).json({ error: "deposit_failed", detail: String(error) });
+  }
 });
 
 type SelectedMarket = { market: Address; created: boolean };
@@ -304,11 +345,17 @@ app.post("/swipe", auth, async (req, res) => {
     });
     marketCache = undefined;
     res.status(202).json({ transactionHash: hash, marketAddress: selected.market, created: selected.created, status: "submitted" });
-  } catch (error) { res.status(400).json({ error: "swipe_failed", detail: String(error) }); }
+  } catch (error) {
+    if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Swipe request is invalid." });
+    res.status(400).json({ error: "swipe_failed", detail: String(error) });
+  }
 });
 
 app.post("/withdraw", auth, async (req, res) => {
-  try { const user: User = res.locals.user; const { amount } = z.object({ amount: z.union([z.string(), z.number()]) }).parse(req.body); const value = typeof amount === "string" ? BigInt(amount) : parseUnits(String(amount), 6); if (user.mode === "connected") return res.status(409).json({ error: "wallet_signature_required", message: "Connected-wallet users must submit Vault.withdraw(amount) from their own wallet.", transaction: { to: vault, functionName: "withdraw", args: [value.toString()] } }); const account = privateKeyToAccount(decrypt(user.encryptedKey! ) as `0x${string}`); const client = createWalletClient({ account, chain, transport: http(rpc) }); const hash = await client.writeContract({ address: vault, abi: vaultAbi, functionName: "withdraw", args: [value] }); res.status(202).json({ transactionHash: hash, status: "submitted" }); } catch (error) { res.status(400).json({ error: "withdraw_failed", detail: String(error) }); }
+  try { const user: User = res.locals.user; const { amount } = z.object({ amount: z.union([z.string(), z.number()]) }).parse(req.body); const value = typeof amount === "string" ? BigInt(amount) : parseUnits(String(amount), 6); if (user.mode === "connected") return res.status(409).json({ error: "wallet_signature_required", message: "Connected-wallet users must submit Vault.withdraw(amount) from their own wallet.", transaction: { to: vault, functionName: "withdraw", args: [value.toString()] } }); const account = privateKeyToAccount(decrypt(user.encryptedKey! ) as `0x${string}`); const client = createWalletClient({ account, chain, transport: http(rpc) }); const hash = await client.writeContract({ address: vault, abi: vaultAbi, functionName: "withdraw", args: [value] }); res.status(202).json({ transactionHash: hash, status: "submitted" }); } catch (error) {
+    if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Withdrawal request is invalid." });
+    res.status(400).json({ error: "withdraw_failed", detail: String(error) });
+  }
 });
 
 app.get("/favorites", auth, async (_req, res) => { const user: User = res.locals.user; const result = await pool.query<{ market_address: string }>("SELECT market_address FROM favorites WHERE user_id = $1 ORDER BY created_at DESC", [user.id]); res.json({ markets: result.rows.map(row => row.market_address) }); });
@@ -335,15 +382,25 @@ app.post("/markets/:address/comments", auth, async (req, res) => {
     const comment: Comment = { id: randomUUID(), userId: user.id, address: user.address, text, createdAt: new Date().toISOString() };
     await pool.query("INSERT INTO comments (id, user_id, market_address, author_address, body, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [comment.id, user.id, address, user.address, text, comment.createdAt]);
     res.status(201).json({ comment });
-  } catch (error) { res.status(400).json({ error: "comment_failed", detail: String(error) }); }
+  } catch (error) {
+    if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Comment request is invalid." });
+    res.status(400).json({ error: "comment_failed", detail: String(error) });
+  }
+});
+
+app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const status = typeof error === "object" && error !== null && "status" in error ? Number(error.status) : undefined;
+  if (error instanceof z.ZodError || (status === 400 && typeof error === "object" && error !== null && "type" in error && error.type === "entity.parse.failed")) {
+    return res.status(400).json({ error: "invalid_request", message: "Request body is invalid." });
+  }
+  console.error(JSON.stringify({ service: "api", action: "unhandled_request_error", error: String(error) }));
+  return res.status(500).json({ error: "internal_error" });
 });
 
 export async function initializeApi() {
   await initializeDatabase();
-  if (!runtimeConfigLogged) {
-    runtimeConfigLogged = true;
-    console.info(JSON.stringify({ service: "api", action: "runtime_config", rpcUrl: sanitizedRpcUrl(), chainId: chain.id, feeds }));
-  }
+  const status = await getNetworkStatus();
+  await logNetworkStatus(status);
 }
 
 export default app;

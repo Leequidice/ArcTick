@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { createPublicClient, createWalletClient, fallback, http, type Address } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { factoryAbi, marketAbi, vaultAbi } from "./abi.js";
+import { evaluateChainStatus, expectedChainId } from "./network-guard.js";
 
 const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return value; };
 const rpc = required("ARC_RPC_URL");
@@ -13,6 +14,7 @@ const vault = required("VAULT_ADDRESS") as Address;
 const settlementUrl = required("SETTLEMENT_API_URL");
 const settlementSecret = required("INTERNAL_KEEPER_SECRET");
 const account = privateKeyToAccount(required("KEEPER_PRIVATE_KEY") as `0x${string}`);
+const expectedNetworkId = expectedChainId(chainId);
 const chain = { id: chainId, name: "Arc", nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 }, rpcUrls: { default: { http: [rpc] } } } as const;
 const transportOptions = { timeout: 20_000, retryCount: 1 } as const;
 const transports = [http(rpc, transportOptions)];
@@ -23,6 +25,31 @@ const transport = transports.length === 1 ? transports[0] : fallback(transports)
 const publicClient = createPublicClient({ chain, transport });
 const walletClient = createWalletClient({ account, chain, transport });
 const log = (action: string, fields: Record<string, unknown>) => console.log(JSON.stringify({ timestamp: new Date().toISOString(), service: "keeper", action, ...fields }));
+
+async function verifyConfiguredNetwork() {
+  let actualChainId: number | null = null;
+  try { actualChainId = await publicClient.getChainId(); }
+  catch (error) {
+    const status = evaluateChainStatus(expectedNetworkId, chainId, null);
+    log("network_mismatch", { ...status, reason: String(error) });
+    throw new Error(`misconfigured_network: expected chain ${expectedNetworkId}, but the configured RPC chain ID could not be read`);
+  }
+  const status = evaluateChainStatus(expectedNetworkId, chainId, actualChainId);
+  if (!status.matchesExpected) {
+    log("network_mismatch", status);
+    throw new Error(`misconfigured_network: expected chain ${expectedNetworkId}, configured ${chainId}, RPC reports ${actualChainId}`);
+  }
+  log("network_verified", status);
+}
+
+// Validate the RPC and configured chain before acquiring the keeper lock or
+// entering any resolve/settle code. A mismatch exits this process non-zero.
+try { await verifyConfiguredNetwork(); }
+catch (error) {
+  log("keeper_network_check_failed", { error: String(error) });
+  process.exitCode = 1;
+  throw error;
+}
 
 const pidFile = resolve(process.env.KEEPER_PID_FILE ?? "run/keeper.pid");
 function isPidLive(pid: number) {
