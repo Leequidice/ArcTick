@@ -1,11 +1,14 @@
 import type { Comment, Market, Session } from "./types";
 
-const configuredApiUrl = import.meta.env.VITE_API_URL?.trim();
-if (!configuredApiUrl) throw new Error("ArcTick is missing VITE_API_URL. Set it in web/.env and restart Vite.");
-export const apiUrl = configuredApiUrl.replace(/\/$/, "");
+// Production is co-located on Vercel and always uses same-origin /api routes;
+// this intentionally ignores any stale VITE_API_URL left from Kubeletto.
+const configuredApiUrl = import.meta.env.DEV ? import.meta.env.VITE_API_URL?.trim() : undefined;
+const configuredApiBase = configuredApiUrl ? configuredApiUrl.replace(/\/$/, "") : (import.meta.env.DEV ? "http://localhost:3001" : "");
+const apiPath = (path: string) => `${configuredApiUrl ? "" : import.meta.env.DEV ? "" : "/api"}${path}`;
+export const apiUrl = configuredApiBase || "/api";
 async function request<T>(path: string, init: RequestInit = {}, session?: Session): Promise<T> {
   try {
-    const response = await fetch(`${apiUrl}${path}`, { ...init, headers: { "content-type": "application/json", ...(session ? { authorization: `Bearer ${session.token}` } : {}), ...init.headers } });
+    const response = await fetch(`${configuredApiBase}${apiPath(path)}`, { ...init, headers: { "content-type": "application/json", ...(session ? { authorization: `Bearer ${session.token}` } : {}), ...init.headers } });
     const body = await response.json(); if (!response.ok) throw new Error(body.message || body.error || "Request failed"); return body;
   } catch (error) {
     console.error("ArcTick API request failed", { path, apiUrl, error });

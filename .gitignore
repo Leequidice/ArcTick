@@ -1,5 +1,7 @@
 .env
 .env.testnet
+web/.env
+web/.env.*.local
 cache/
 out/
 broadcast/

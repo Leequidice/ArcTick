@@ -1,7 +1,5 @@
 import "dotenv/config";
 import { randomBytes, randomUUID, scryptSync, createCipheriv, createDecipheriv } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import express from "express";
 import { OAuth2Client } from "google-auth-library";
 import { SignJWT, jwtVerify } from "jose";
@@ -11,17 +9,18 @@ import { z } from "zod";
 import { aggregatorAbi, factoryAbi, marketAbi, usdcAbi, vaultAbi } from "./abi.js";
 import { DURATIONS } from "./feeds.js";
 import { configuredFeeds } from "./network-feeds.js";
+import { isValidInternalSecret } from "./internal-auth.js";
+import { consumeWalletNonce, createGoogleUser, getOrCreateConnectedUser, getUserByAddress, getUserByGoogleSub, getUserById, initializeDatabase, pool, setWalletNonce, withOperatorTransactionLock, type User } from "./database.js";
 
 const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return value; };
 const rpc = required("ARC_RPC_URL");
 const vault = required("VAULT_ADDRESS") as Address;
 const factory = required("FACTORY_ADDRESS") as Address;
 const usdc = (process.env.USDC_ADDRESS ?? "0x3600000000000000000000000000000000000000") as Address;
-const operator = privateKeyToAccount(required("KEEPER_PRIVATE_KEY") as `0x${string}`);
+const operator = privateKeyToAccount(required("API_OPERATOR_PRIVATE_KEY") as `0x${string}`);
 const jwtSecret = new TextEncoder().encode(required("JWT_SECRET"));
 const masterKey = scryptSync(required("WALLET_MASTER_SECRET"), "arctick-wallet-v1", 32);
-const usersPath = process.env.USERS_DB_PATH ?? "data/users.json";
-mkdirSync(dirname(usersPath), { recursive: true });
+required("DATABASE_URL");
 const chain = { id: Number(required("ARC_CHAIN_ID")), name: "Arc", nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 }, rpcUrls: { default: { http: [rpc] } } } as const;
 const feeds = configuredFeeds(chain.id);
 // Keep individual requests small for Arc providers. Mainnet falls back to the
@@ -34,25 +33,65 @@ const publicClient = createPublicClient({ chain, transport: publicTransport });
 const operatorClient = createWalletClient({ account: operator, chain, transport: http(rpc) });
 const google = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-type User = { id: string; address: Address; mode: "custodial" | "connected"; encryptedKey?: string; googleSub?: string; nonce?: string };
-let users: User[] = existsSync(usersPath) ? JSON.parse(readFileSync(usersPath, "utf8")) : [];
-function save() { writeFileSync(usersPath, JSON.stringify(users, null, 2), { mode: 0o600 }); }
 function encrypt(value: string) { const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", masterKey, iv); const data = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]); return Buffer.concat([iv, cipher.getAuthTag(), data]).toString("base64"); }
 function decrypt(value: string) { const raw = Buffer.from(value, "base64"), decipher = createDecipheriv("aes-256-gcm", masterKey, raw.subarray(0, 12)); decipher.setAuthTag(raw.subarray(12, 28)); return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8"); }
 function token(user: User) { return new SignJWT({ address: user.address, mode: user.mode }).setProtectedHeader({ alg: "HS256" }).setSubject(user.id).setExpirationTime("7d").sign(jwtSecret); }
-async function auth(req: express.Request, res: express.Response, next: express.NextFunction) { try { const raw = req.header("authorization")?.replace(/^Bearer\s+/i, ""); if (!raw) throw new Error(); const verified = await jwtVerify(raw, jwtSecret); const user = users.find(candidate => candidate.id === verified.payload.sub); if (!user) throw new Error(); res.locals.user = user; next(); } catch { res.status(401).json({ error: "unauthorized" }); } }
-const app = express();
+async function auth(req: express.Request, res: express.Response, next: express.NextFunction) { try { const raw = req.header("authorization")?.replace(/^Bearer\s+/i, ""); if (!raw) throw new Error(); const verified = await jwtVerify(raw, jwtSecret); const userId = verified.payload.sub; if (!userId) throw new Error(); const user = await getUserById(userId); if (!user) throw new Error(); res.locals.user = user; next(); } catch { res.status(401).json({ error: "unauthorized" }); } }
+export const app = express();
 // Apply CORS before body parsing so client-visible error responses retain the
 // same headers as successful auth responses.
-app.use((_req, res, next) => { res.setHeader("Access-Control-Allow-Origin", process.env.WEB_ORIGIN ?? "http://localhost:5173"); res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type"); res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"); if (_req.method === "OPTIONS") return res.sendStatus(204); next(); });
+app.use((_req, res, next) => {
+  const webOrigin = process.env.WEB_ORIGIN ?? (process.env.NODE_ENV === "production" ? undefined : "http://localhost:5173");
+  if (webOrigin) res.setHeader("Access-Control-Allow-Origin", webOrigin);
+  res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  if (_req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 app.use(express.json());
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
+// Keeper-to-API channel only. This credential is separate from user JWTs and
+// is never returned to a client or included in logs.
+app.post("/internal/settle", async (req, res) => {
+  const configuredSecret = process.env.INTERNAL_KEEPER_SECRET;
+  const suppliedSecret = req.header("x-keeper-secret");
+  if (!configuredSecret) return res.status(503).json({ error: "internal_settlement_unconfigured" });
+  if (!isValidInternalSecret(configuredSecret, suppliedSecret)) return res.status(401).json({ error: "internal_unauthorized" });
+
+  try {
+    const { market } = z.object({ market: z.string().refine(isAddress) }).parse(req.body);
+    const address = market as Address;
+    const [marketFactory, marketUsdc, resolved] = await Promise.all([
+      publicClient.readContract({ address, abi: marketAbi, functionName: "factory" }),
+      publicClient.readContract({ address, abi: marketAbi, functionName: "usdc" }),
+      publicClient.readContract({ address, abi: marketAbi, functionName: "resolved" })
+    ]);
+    if (marketFactory.toLowerCase() !== factory.toLowerCase() || marketUsdc.toLowerCase() !== usdc.toLowerCase()) {
+      return res.status(400).json({ error: "unknown_market" });
+    }
+    if (!resolved) return res.status(409).json({ error: "market_not_resolved" });
+
+    const result = await withOperatorTransactionLock(async () => {
+      const [settled, participants] = await Promise.all([
+        publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "marketSettled", args: [address] }),
+        publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "getMarketParticipants", args: [address] })
+      ]);
+      if (settled) return { status: "already_settled" as const };
+      if (participants.length === 0) return { status: "no_positions" as const };
+      const hash = await operatorClient.writeContract({ address: vault, abi: vaultAbi, functionName: "operatorSettleMarket", args: [address] });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") throw new Error(`vault settlement reverted: ${hash}`);
+      return { status: "settled" as const, transactionHash: hash, blockNumber: receipt.blockNumber.toString() };
+    });
+    res.json({ market: address, ...result });
+  } catch (error) {
+    console.error(JSON.stringify({ service: "api", action: "internal_settlement_failed", error: String(error) }));
+    res.status(500).json({ error: "internal_settlement_failed" });
+  }
+});
+
 type Comment = { id: string; userId: string; address: string; text: string; createdAt: string };
-type Community = { favorites: Record<string, string[]>; comments: Record<string, Comment[]> };
-const communityPath = process.env.COMMUNITY_DB_PATH ?? "data/community.json";
-let community: Community = existsSync(communityPath) ? JSON.parse(readFileSync(communityPath, "utf8")) : { favorites: {}, comments: {} };
-function saveCommunity() { writeFileSync(communityPath, JSON.stringify(community, null, 2), { mode: 0o600 }); }
 const marketCacheTtlMs = Number(process.env.MARKETS_CACHE_TTL_MS ?? 4_000);
 let marketCache: { expiresAt: number; value: unknown } | undefined;
 let marketCachePending: Promise<unknown> | undefined;
@@ -110,37 +149,47 @@ async function openMarkets() {
 }
 
 app.post("/auth/google", async (req, res) => {
+  let googleSub: string;
   try {
     const { idToken } = z.object({ idToken: z.string() }).parse(req.body);
     const ticket = await google.verifyIdToken({ idToken, audience: required("GOOGLE_CLIENT_ID") });
     const payload = ticket.getPayload(); if (!payload?.sub) throw new Error("Google token has no subject");
-    let user = users.find(candidate => candidate.googleSub === payload.sub);
-    if (!user) { const key = generatePrivateKey(); const account = privateKeyToAccount(key); user = { id: randomUUID(), address: account.address, mode: "custodial", encryptedKey: encrypt(key), googleSub: payload.sub }; users.push(user); save(); }
-    res.json({ token: await token(user), address: user.address, custodial: true });
+    googleSub = payload.sub;
   } catch (error) {
-    // Keep provider diagnostics in the server log; token-validation details do
-    // not belong in a browser response.
     console.error(JSON.stringify({ service: "api", action: "google_token_verification_failed", error: String(error) }));
     res.status(401).json({ error: "invalid_google_token" });
+    return;
+  }
+  try {
+    let user = await getUserByGoogleSub(googleSub);
+    if (!user) { const key = generatePrivateKey(); const account = privateKeyToAccount(key); user = await createGoogleUser({ id: randomUUID(), address: account.address, mode: "custodial", encryptedKey: encrypt(key), googleSub }); }
+    res.json({ token: await token(user), address: user.address, custodial: true });
+  } catch (error) {
+    // Keep storage failures distinct from invalid credentials so persistence
+    // issues are diagnosable without leaking provider details to the browser.
+    console.error(JSON.stringify({ service: "api", action: "google_user_storage_failed", error: String(error) }));
+    res.status(503).json({ error: "authentication_storage_unavailable" });
   }
 });
 
-app.post("/auth/wallet/nonce", (req, res) => {
+app.post("/auth/wallet/nonce", async (req, res) => {
   const { address } = z.object({ address: z.string().refine(isAddress) }).parse(req.body);
-  const normalized = address as Address; let user = users.find(candidate => candidate.address.toLowerCase() === normalized.toLowerCase());
-  if (!user) { user = { id: randomUUID(), address: normalized, mode: "connected" }; users.push(user); }
-  user.nonce = randomBytes(24).toString("hex"); save();
+  const normalized = address as Address; const current = await getOrCreateConnectedUser(normalized);
+  const user = await setWalletNonce(current.id, randomBytes(24).toString("hex"));
+  if (!user) return res.status(404).json({ error: "wallet_user_not_found" });
   res.json({ message: `ArcTick wallet authentication nonce: ${user.nonce}` });
 });
 
 app.post("/wallet/connect", async (req, res) => {
   try {
     const { address, signature } = z.object({ address: z.string().refine(isAddress), signature: z.string() }).parse(req.body);
-    const user = users.find(candidate => candidate.address.toLowerCase() === address.toLowerCase());
+    const user = await getUserByAddress(address);
     if (!user?.nonce || user.mode !== "connected") throw new Error("request a nonce first");
     const message = `ArcTick wallet authentication nonce: ${user.nonce}`;
     if ((await recoverMessageAddress({ message, signature: signature as `0x${string}` })).toLowerCase() !== address.toLowerCase()) throw new Error("bad signature");
-    delete user.nonce; save(); res.json({ token: await token(user), address: user.address, custodial: false });
+    const authenticatedUser = await consumeWalletNonce(user.id, user.nonce);
+    if (!authenticatedUser) throw new Error("nonce already used; request a fresh one");
+    res.json({ token: await token(authenticatedUser), address: authenticatedUser.address, custodial: false });
   } catch (error) { res.status(401).json({ error: "wallet_auth_failed", detail: String(error) }); }
 });
 
@@ -170,9 +219,12 @@ async function createOrReuseMarket(slot: Slot): Promise<SelectedMarket> {
   const existing = await openMarketForSlot(slot);
   if (existing) return { market: existing.address, created: false };
   try {
-    const hash = await operatorClient.writeContract({ address: factory, abi: factoryAbi, functionName: "createMarket", args: [slot.assetPair, slot.feed, BigInt(slot.duration)] });
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    if (receipt.status !== "success") throw new Error(`market creation reverted: ${hash}`);
+    await withOperatorTransactionLock(async () => {
+      const submitted = await operatorClient.writeContract({ address: factory, abi: factoryAbi, functionName: "createMarket", args: [slot.assetPair, slot.feed, BigInt(slot.duration)] });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: submitted });
+      if (receipt.status !== "success") throw new Error(`market creation reverted: ${submitted}`);
+      return submitted;
+    });
   } catch (creationError) {
     // The duplicate guard is the expected race path: another swipe may have
     // created the same slot after our initial read. Only recover if a live
@@ -205,7 +257,12 @@ app.post("/swipe", auth, async (req, res) => {
     const slot = slotById.get(body.slotId); if (!slot) return res.status(400).json({ error: "unknown_market_slot" });
     const amount = typeof body.amount === "string" ? BigInt(body.amount) : parseUnits(String(body.amount), 6);
     const selected = await marketForSwipe(slot);
-    const hash = await operatorClient.writeContract({ address: vault, abi: vaultAbi, functionName: "operatorPlaceBet", args: [user.address, selected.market, body.isYes, amount] });
+    const hash = await withOperatorTransactionLock(async () => {
+      const submitted = await operatorClient.writeContract({ address: vault, abi: vaultAbi, functionName: "operatorPlaceBet", args: [user.address, selected.market, body.isYes, amount] });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: submitted });
+      if (receipt.status !== "success") throw new Error(`bet transaction reverted: ${submitted}`);
+      return submitted;
+    });
     marketCache = undefined;
     res.status(202).json({ transactionHash: hash, marketAddress: selected.market, created: selected.created, status: "submitted" });
   } catch (error) { res.status(400).json({ error: "swipe_failed", detail: String(error) }); }
@@ -215,16 +272,35 @@ app.post("/withdraw", auth, async (req, res) => {
   try { const user: User = res.locals.user; const { amount } = z.object({ amount: z.union([z.string(), z.number()]) }).parse(req.body); const value = typeof amount === "string" ? BigInt(amount) : parseUnits(String(amount), 6); if (user.mode === "connected") return res.status(409).json({ error: "wallet_signature_required", message: "Connected-wallet users must submit Vault.withdraw(amount) from their own wallet.", transaction: { to: vault, functionName: "withdraw", args: [value.toString()] } }); const account = privateKeyToAccount(decrypt(user.encryptedKey! ) as `0x${string}`); const client = createWalletClient({ account, chain, transport: http(rpc) }); const hash = await client.writeContract({ address: vault, abi: vaultAbi, functionName: "withdraw", args: [value] }); res.status(202).json({ transactionHash: hash, status: "submitted" }); } catch (error) { res.status(400).json({ error: "withdraw_failed", detail: String(error) }); }
 });
 
-app.get("/favorites", auth, (_req, res) => { const user: User = res.locals.user; res.json({ markets: community.favorites[user.id] ?? [] }); });
-app.post("/markets/:address/favorite", auth, (req, res) => {
-  const user: User = res.locals.user; const address = z.string().refine(isAddress).parse(req.params.address).toLowerCase(); const saved = new Set(community.favorites[user.id] ?? []); saved.add(address); community.favorites[user.id] = [...saved]; saveCommunity(); res.status(201).json({ favorited: true, address });
+app.get("/favorites", auth, async (_req, res) => { const user: User = res.locals.user; const result = await pool.query<{ market_address: string }>("SELECT market_address FROM favorites WHERE user_id = $1 ORDER BY created_at DESC", [user.id]); res.json({ markets: result.rows.map(row => row.market_address) }); });
+app.post("/markets/:address/favorite", auth, async (req, res) => {
+  const user: User = res.locals.user; const address = z.string().refine(isAddress).parse(req.params.address).toLowerCase();
+  await pool.query("INSERT INTO favorites (user_id, market_address) VALUES ($1, $2) ON CONFLICT DO NOTHING", [user.id, address]);
+  res.status(201).json({ favorited: true, address });
 });
-app.delete("/markets/:address/favorite", auth, (req, res) => {
-  const user: User = res.locals.user; const address = z.string().refine(isAddress).parse(req.params.address).toLowerCase(); community.favorites[user.id] = (community.favorites[user.id] ?? []).filter(item => item !== address); saveCommunity(); res.json({ favorited: false, address });
+app.delete("/markets/:address/favorite", auth, async (req, res) => {
+  const user: User = res.locals.user; const address = z.string().refine(isAddress).parse(req.params.address).toLowerCase();
+  await pool.query("DELETE FROM favorites WHERE user_id = $1 AND market_address = $2", [user.id, address]);
+  res.json({ favorited: false, address });
 });
-app.get("/markets/:address/comments", auth, (req, res) => { const address = z.string().refine(isAddress).parse(req.params.address).toLowerCase(); res.json({ comments: community.comments[address] ?? [] }); });
-app.post("/markets/:address/comments", auth, (req, res) => {
-  try { const user: User = res.locals.user; const address = z.string().refine(isAddress).parse(req.params.address).toLowerCase(); const text = cleanComment(z.object({ text: z.string().max(280) }).parse(req.body).text); if (text.length === 0 || bannedWords.test(text)) return res.status(400).json({ error: "invalid_comment" }); const comment: Comment = { id: randomUUID(), userId: user.id, address: user.address, text, createdAt: new Date().toISOString() }; (community.comments[address] ??= []).push(comment); saveCommunity(); res.status(201).json({ comment }); } catch (error) { res.status(400).json({ error: "comment_failed", detail: String(error) }); }
+app.get("/markets/:address/comments", auth, async (req, res) => {
+  const address = z.string().refine(isAddress).parse(req.params.address).toLowerCase();
+  const result = await pool.query<{ id: string; user_id: string; author_address: string; body: string; created_at: Date }>("SELECT id, user_id, author_address, body, created_at FROM comments WHERE market_address = $1 ORDER BY created_at ASC, id ASC", [address]);
+  const comments: Comment[] = result.rows.map(row => ({ id: row.id, userId: row.user_id, address: row.author_address, text: row.body, createdAt: row.created_at.toISOString() }));
+  res.json({ comments });
+});
+app.post("/markets/:address/comments", auth, async (req, res) => {
+  try {
+    const user: User = res.locals.user; const address = z.string().refine(isAddress).parse(req.params.address).toLowerCase(); const text = cleanComment(z.object({ text: z.string().max(280) }).parse(req.body).text);
+    if (text.length === 0 || bannedWords.test(text)) return res.status(400).json({ error: "invalid_comment" });
+    const comment: Comment = { id: randomUUID(), userId: user.id, address: user.address, text, createdAt: new Date().toISOString() };
+    await pool.query("INSERT INTO comments (id, user_id, market_address, author_address, body, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [comment.id, user.id, address, user.address, text, comment.createdAt]);
+    res.status(201).json({ comment });
+  } catch (error) { res.status(400).json({ error: "comment_failed", detail: String(error) }); }
 });
 
-app.listen(Number(process.env.API_PORT ?? 3000), () => console.log(JSON.stringify({ service: "api", action: "listening", port: Number(process.env.API_PORT ?? 3000) })));
+export async function initializeApi() {
+  await initializeDatabase();
+}
+
+export default app;

@@ -5,5 +5,5 @@ process.env.ARCTICK_EMBEDDED = "true";
 
 // Importing starts the API listener, then the keeper poll loop in this same
 // Node process. The keeper retains its PID lock and graceful SIGTERM handling.
-await import("./api.ts");
+await import("./start-api.mjs");
 await import("./keeper.ts");

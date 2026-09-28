@@ -10,6 +10,8 @@ const rpc = required("ARC_RPC_URL");
 const chainId = Number(required("ARC_CHAIN_ID"));
 const factory = required("FACTORY_ADDRESS") as Address;
 const vault = required("VAULT_ADDRESS") as Address;
+const settlementUrl = required("SETTLEMENT_API_URL");
+const settlementSecret = required("INTERNAL_KEEPER_SECRET");
 const account = privateKeyToAccount(required("KEEPER_PRIVATE_KEY") as `0x${string}`);
 const chain = { id: chainId, name: "Arc", nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 }, rpcUrls: { default: { http: [rpc] } } } as const;
 const transportOptions = { timeout: 20_000, retryCount: 1 } as const;
@@ -64,9 +66,21 @@ async function send(request: Parameters<typeof walletClient.writeContract>[0], a
   return hash;
 }
 
+async function requestSettlement(market: Address) {
+  const response = await fetch(settlementUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-keeper-secret": settlementSecret },
+    body: JSON.stringify({ market })
+  });
+  const body = await response.json() as { status?: string; transactionHash?: string; error?: string };
+  if (!response.ok) throw new Error(`settlement API returned ${response.status}: ${body.error ?? "unknown error"}`);
+  log("market_settlement_checked", { market, status: body.status, transactionHash: body.transactionHash });
+}
+
 async function tick() {
   // Creation is deliberately absent: /swipe creates a slot only when a user
-  // demands it. The keeper is restricted to resolution and Vault settlement.
+  // demands it. The keeper resolves permissionlessly, then requests settlement
+  // from the API's sole Vault operator using a separate service credential.
   const managedMarkets = (process.env.KEEPER_MANAGED_MARKETS ?? "").split(",").map(value => value.trim()).filter(Boolean) as Address[];
   const count = managedMarkets.length === 0
     ? await publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "marketCount" })
@@ -82,57 +96,71 @@ async function tick() {
       publicClient.readContract({ address: market, abi: marketAbi, functionName: "resolved" })
     ]);
     if (!resolved && endTime <= now) await send({ address: market, abi: marketAbi, functionName: "resolve" }, "market_resolved");
-    if (resolved) {
+    const nowResolved = resolved || endTime <= now;
+    if (nowResolved) {
       const [users, settled] = await Promise.all([
         publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "getMarketParticipants", args: [market] }),
         publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "marketSettled", args: [market] })
       ]);
-      if (users.length && !settled) await send({ address: vault, abi: vaultAbi, functionName: "operatorSettleMarket", args: [market] }, "market_settled");
+      if (users.length && !settled) await requestSettlement(market);
     }
   }
 
 }
 
-const interval = Number(process.env.KEEPER_POLL_MS ?? 15_000);
-let tickRunning = false;
-let stopping = false;
-async function runTick() {
-  if (stopping) return;
-  if (tickRunning) {
-    log("tick_skipped", { reason: "previous_tick_still_running" });
-    return;
+if (process.env.KEEPER_RUN_ONCE === "true") {
+  try {
+    await tick();
+    log("keeper_run_complete", { pid: process.pid });
+  } catch (error) {
+    log("keeper_run_failed", { pid: process.pid, error: String(error) });
+    process.exitCode = 1;
+  } finally {
+    releasePidLock();
+    log("keeper_stopped", { pid: process.pid });
   }
-  tickRunning = true;
-  try { await tick(); }
-  catch (error) { log("tick_failed", { error: String(error) }); }
-  finally { tickRunning = false; }
-}
-let activeTick: Promise<void> | undefined;
-function scheduleTick() {
-  if (tickRunning) {
-    log("tick_skipped", { reason: "previous_tick_still_running" });
-    return;
+} else {
+  const interval = Number(process.env.KEEPER_POLL_MS ?? 15_000);
+  let tickRunning = false;
+  let stopping = false;
+  async function runTick() {
+    if (stopping) return;
+    if (tickRunning) {
+      log("tick_skipped", { reason: "previous_tick_still_running" });
+      return;
+    }
+    tickRunning = true;
+    try { await tick(); }
+    catch (error) { log("tick_failed", { error: String(error) }); }
+    finally { tickRunning = false; }
   }
-  activeTick = runTick().finally(() => { activeTick = undefined; });
-}
-scheduleTick();
-const timer = setInterval(scheduleTick, interval);
+  let activeTick: Promise<void> | undefined;
+  function scheduleTick() {
+    if (tickRunning) {
+      log("tick_skipped", { reason: "previous_tick_still_running" });
+      return;
+    }
+    activeTick = runTick().finally(() => { activeTick = undefined; });
+  }
+  scheduleTick();
+  const timer = setInterval(scheduleTick, interval);
 
-async function shutdown(signal: string) {
-  if (stopping) return;
-  stopping = true;
-  clearInterval(timer);
-  log("keeper_stopping", { pid: process.pid, signal });
-  if (activeTick) {
-    const completed = await Promise.race([
-      activeTick.then(() => true),
-      new Promise<boolean>(resolve => setTimeout(() => resolve(false), shutdownGraceMs))
-    ]);
-    if (!completed) log("keeper_shutdown_timeout", { pid: process.pid, graceMs: shutdownGraceMs });
+  async function shutdown(signal: string) {
+    if (stopping) return;
+    stopping = true;
+    clearInterval(timer);
+    log("keeper_stopping", { pid: process.pid, signal });
+    if (activeTick) {
+      const completed = await Promise.race([
+        activeTick.then(() => true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), shutdownGraceMs))
+      ]);
+      if (!completed) log("keeper_shutdown_timeout", { pid: process.pid, graceMs: shutdownGraceMs });
+    }
+    releasePidLock();
+    log("keeper_stopped", { pid: process.pid });
+    process.exit(0);
   }
-  releasePidLock();
-  log("keeper_stopped", { pid: process.pid });
-  process.exit(0);
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
 }
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));

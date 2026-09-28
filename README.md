@@ -62,12 +62,35 @@ for a market only after verifying the market was deployed by the configured fact
 uses the same USDC token. Its per-market, per-user YES/NO ledger means the Vault can claim
 once and redistribute the exact payout internally, including all refund cases.
 
-The Node services live in `services/`. `keeper.ts` creates the rolling 10×3 markets,
-resolves ended markets, and settles Vault positions. `api.ts` supplies Google and
-signature-wallet auth, balance, swipe, and withdrawal endpoints. Custodial Google users
-have AES-256-GCM-encrypted keys (derived from `WALLET_MASTER_SECRET`) and can have the
-server submit a withdrawal. Connected-wallet users must sign `Vault.withdraw` themselves;
-the API returns the transaction request instead of signing on their behalf.
+The Node services live in `services/`. `keeper.ts` resolves ended markets and settles
+Vault positions; market creation is demand-triggered by `/swipe`. `api.ts` supplies Google
+and signature-wallet auth, balance, swipe, and withdrawal endpoints. Custodial Google
+users have AES-256-GCM-encrypted keys (derived from `WALLET_MASTER_SECRET`) and can have
+the server submit a withdrawal. Connected-wallet users must sign `Vault.withdraw`
+themselves; the API returns the transaction request instead of signing on their behalf.
+
+The API stores user records (including encrypted custodial keys), favorites, and comments
+in PostgreSQL via `DATABASE_URL`; it creates missing tables on first use. It has no local-file
+storage fallback. Production is designed for one Vercel project: static frontend output is
+`web/dist`, and `/api/*` is handled by the Node function in `api/`. Leave `VITE_API_URL`
+unset in Vercel; production always calls the same-origin API. Local development can point
+`VITE_API_URL` at `http://localhost:3001`.
+
+Vercel Hobby functions are stateless and may cold-start after idle; the first API request can
+take longer while the function and Neon compute wake. Neon Free currently includes 0.5 GB
+storage, 100 compute-hours per project monthly, and scale-to-zero after five idle minutes.
+This is a hackathon/demo configuration, not an availability guarantee. Set `DATABASE_URL`,
+`ARC_RPC_URL`, `ARC_CHAIN_ID`, `FACTORY_ADDRESS`, `VAULT_ADDRESS`, `API_OPERATOR_PRIVATE_KEY`,
+`INTERNAL_KEEPER_SECRET`, `JWT_SECRET`, `WALLET_MASTER_SECRET`, and `GOOGLE_CLIENT_ID` as Vercel environment variables.
+The API signer must be separate from `KEEPER_PRIVATE_KEY`, which belongs only in GitHub Actions
+secrets. Do not store production values in the repository.
+
+The GitHub Actions workflow `.github/workflows/keeper.yml` runs the keeper once every five
+minutes and supports manual `workflow_dispatch`. Configure repository secrets `INTERNAL_KEEPER_SECRET`,
+`ARC_RPC_URL`, `ARC_CHAIN_ID`, `FACTORY_ADDRESS`, `VAULT_ADDRESS`, and `KEEPER_PRIVATE_KEY`.
+The keeper key is used only for permissionless market resolution; the API signer submits Vault
+settlements after an authenticated internal request. GitHub scheduled runs can be delayed; dispatch
+the workflow manually during a live demo when immediate resolution is needed.
 
 Do not use the Arc-mainnet Chainlink feed map against testnet. As of 2026-09-20, Chainlink's
 official address registry has no Arc Testnet price-feed entries; therefore
@@ -87,8 +110,8 @@ npm install
 npm run dev
 ```
 
-Set `VITE_API_URL` to the API origin and `VITE_GOOGLE_CLIENT_ID` to the browser OAuth
-client. The API needs `WEB_ORIGIN` set to the deployed web origin. For mainnet, use a
+Set `VITE_API_URL` to the local API origin and `VITE_GOOGLE_CLIENT_ID` to the browser OAuth
+client. For mainnet, use a
 dedicated `ARC_RPC_URL`; `GET /markets` uses a short shared cache (`MARKETS_CACHE_TTL_MS`,
 default four seconds), bounded RPC reads, and falls back to the official Arc RPC if the
 dedicated provider is unavailable.

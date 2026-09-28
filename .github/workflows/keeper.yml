@@ -1,0 +1,46 @@
+name: ArcTick keeper
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arctick-mainnet-keeper
+  cancel-in-progress: false
+
+jobs:
+  resolve-and-settle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ARC_CHAIN_ID: ${{ secrets.ARC_CHAIN_ID }}
+      ARC_RPC_URL: ${{ secrets.ARC_RPC_URL }}
+      FACTORY_ADDRESS: ${{ secrets.FACTORY_ADDRESS }}
+      VAULT_ADDRESS: ${{ secrets.VAULT_ADDRESS }}
+      KEEPER_PRIVATE_KEY: ${{ secrets.KEEPER_PRIVATE_KEY }}
+      INTERNAL_KEEPER_SECRET: ${{ secrets.INTERNAL_KEEPER_SECRET }}
+      SETTLEMENT_API_URL: https://arctick.vercel.app/api/internal/settle
+      KEEPER_RUN_ONCE: "true"
+      KEEPER_PID_FILE: ${{ runner.temp }}/arctick-keeper.pid
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Check required secrets are configured
+        shell: bash
+        run: |
+          for name in ARC_CHAIN_ID ARC_RPC_URL FACTORY_ADDRESS VAULT_ADDRESS KEEPER_PRIVATE_KEY INTERNAL_KEEPER_SECRET; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error title=Missing GitHub Actions secret::$name is not configured"
+              exit 1
+            fi
+          done
+      - run: npm ci
+      - name: Resolve markets and request API settlement
+        run: npm run keeper:once

@@ -10,6 +10,8 @@ export const aggregatorAbi = [
 ] as const;
 
 export const marketAbi = [
+  { type: "function", name: "factory", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+  { type: "function", name: "usdc", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
   { type: "function", name: "assetPair", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
   { type: "function", name: "startTime", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
   { type: "function", name: "endTime", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },

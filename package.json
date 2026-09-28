@@ -8,8 +8,11 @@
     "start:api": "node --import tsx services/start-api.mjs",
     "start:keeper": "node --import tsx services/keeper.ts",
     "keeper": "node --import tsx services/keeper.ts",
+    "keeper:once": "node --import tsx services/keeper.ts",
     "keeper:stop": "node --import tsx services/keeper-stop.ts",
-    "api": "node --import tsx services/api.ts",
+    "api": "node --import tsx services/start-api.mjs",
+    "build:web": "npm --prefix web run build",
+    "test:services": "node --import tsx --test services/internal-auth.test.ts services/keeper-permissions.test.ts",
     "test:api": "tsx services/api-smoke.ts",
     "typecheck": "tsc --noEmit"
   },
