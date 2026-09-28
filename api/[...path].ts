@@ -9,7 +9,18 @@ import app, { initializeApi } from "../services/api.js";
 export default async function handler(req: Request, res: Response) {
   try {
     await initializeApi();
-    req.url = (req.url ?? "/").replace(/^\/api(?=\/|$)/, "") || "/";
+    // Vercel's rewrite forwards every /api/* request to this single function
+    // and places the original path in `path`; remove that routing parameter
+    // before handing the request to Express.
+    const forwardedPath = req.query.path;
+    if (forwardedPath) {
+      const segments = Array.isArray(forwardedPath) ? forwardedPath : [forwardedPath];
+      const rewritten = new URL(req.url ?? "/", "http://vercel.local");
+      rewritten.searchParams.delete("path");
+      req.url = `/${segments.join("/")}${rewritten.search}`;
+    } else {
+      req.url = (req.url ?? "/").replace(/^\/api(?=\/|$)/, "") || "/";
+    }
     return app(req, res);
   } catch (error) {
     console.error(JSON.stringify({ service: "api", action: "initialization_failed", error: String(error) }));

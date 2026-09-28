@@ -26,12 +26,21 @@ const feeds = configuredFeeds(chain.id);
 // Keep individual requests small for Arc providers. Mainnet falls back to the
 // official endpoint if a dedicated provider is temporarily unavailable.
 const rpcOptions = { timeout: 20_000, retryCount: 1 };
+function sanitizedRpcUrl() {
+  try {
+    const parsed = new URL(rpc);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return "invalid_rpc_url";
+  }
+}
 const publicTransport = Number(process.env.ARC_CHAIN_ID) === 5042 && rpc !== "https://rpc.mainnet.arc.io"
   ? fallback([http(rpc, rpcOptions), http("https://rpc.mainnet.arc.io", rpcOptions)])
   : http(rpc, rpcOptions);
 const publicClient = createPublicClient({ chain, transport: publicTransport });
 const operatorClient = createWalletClient({ account: operator, chain, transport: http(rpc) });
 const google = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+let runtimeConfigLogged = false;
 
 function encrypt(value: string) { const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", masterKey, iv); const data = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]); return Buffer.concat([iv, cipher.getAuthTag(), data]).toString("base64"); }
 function decrypt(value: string) { const raw = Buffer.from(value, "base64"), decipher = createDecipheriv("aes-256-gcm", masterKey, raw.subarray(0, 12)); decipher.setAuthTag(raw.subarray(12, 28)); return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8"); }
@@ -53,7 +62,10 @@ app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 // Keeper-to-API channel only. This credential is separate from user JWTs and
 // is never returned to a client or included in logs.
-app.post("/internal/settle", async (req, res) => {
+// Vercel's current build exposes this catch-all as one path segment, so keep a
+// single-segment alias for the scheduled keeper while retaining the local/API
+// route used by non-Vercel hosts.
+app.post(["/internal/settle", "/settle"], async (req, res) => {
   const configuredSecret = process.env.INTERNAL_KEEPER_SECRET;
   const suppliedSecret = req.header("x-keeper-secret");
   if (!configuredSecret) return res.status(503).json({ error: "internal_settlement_unconfigured" });
@@ -126,17 +138,44 @@ async function openMarketForSlot(slot: Slot) {
 async function loadOpenMarkets() {
   const now = Math.floor(Date.now() / 1000);
   const values = await mapConcurrent(slots, 3, async slot => {
-    const [round, market] = await Promise.all([
+    const [roundResult, marketResult] = await Promise.allSettled([
       publicClient.readContract({ address: slot.feed, abi: aggregatorAbi, functionName: "latestRoundData" }),
       openMarketForSlot(slot)
     ]);
-    const base = { slotId: slot.slotId, assetPair: slot.assetPair, feedAddress: slot.feed, duration: String(slot.duration), price: round[1].toString(), priceUpdatedAt: round[3].toString() };
-    if (!market) return { ...base, kind: "virtual" as const, address: undefined, startTime: undefined, endTime: undefined, timeRemaining: 0, yesPool: "0", noPool: "0", yesParticipants: "0", noParticipants: "0" };
-    const [pools, participants] = await Promise.all([
-      publicClient.readContract({ address: market.address, abi: marketAbi, functionName: "getPoolSizes" }),
-      publicClient.readContract({ address: market.address, abi: marketAbi, functionName: "getParticipantCounts" })
-    ]);
-    return { ...base, kind: "live" as const, address: market.address, startTime: market.startTime.toString(), endTime: market.endTime.toString(), timeRemaining: Math.max(0, Number(market.endTime) - now), yesPool: pools[0].toString(), noPool: pools[1].toString(), yesParticipants: participants[0].toString(), noParticipants: participants[1].toString() };
+    const round = roundResult.status === "fulfilled" ? roundResult.value : undefined;
+    const market = marketResult.status === "fulfilled" ? marketResult.value : undefined;
+    const feedAvailable = round !== undefined;
+    const base = {
+      slotId: slot.slotId, assetPair: slot.assetPair, feedAddress: slot.feed,
+      duration: String(slot.duration), price: round?.[1].toString() ?? null,
+      priceUpdatedAt: round?.[3].toString() ?? null
+    };
+    const unavailable = (reason: string, kind: "unavailable" | "live" = "unavailable") => ({
+      ...base, kind, status: "unavailable" as const, unavailableReason: reason,
+      address: market?.address, startTime: market?.startTime.toString(), endTime: market?.endTime.toString(),
+      timeRemaining: market ? Math.max(0, Number(market.endTime) - now) : 0,
+      yesPool: null, noPool: null, yesParticipants: null, noParticipants: null
+    });
+    if (!feedAvailable) {
+      const error = roundResult.status === "rejected" ? String(roundResult.reason) : "unknown_feed_error";
+      console.error(JSON.stringify({ service: "api", action: "market_slot_unavailable", slotId: slot.slotId, feed: slot.feed, reason: "price_feed_unavailable", error }));
+      return unavailable("price_feed_unavailable", market ? "live" : "unavailable");
+    }
+    if (marketResult.status === "rejected") {
+      console.error(JSON.stringify({ service: "api", action: "market_slot_unavailable", slotId: slot.slotId, feed: slot.feed, reason: "market_lookup_failed", error: String(marketResult.reason) }));
+      return unavailable("market_lookup_failed");
+    }
+    if (!market) return { ...base, kind: "virtual" as const, status: "available" as const, address: undefined, startTime: undefined, endTime: undefined, timeRemaining: 0, yesPool: "0", noPool: "0", yesParticipants: "0", noParticipants: "0" };
+    try {
+      const [pools, participants] = await Promise.all([
+        publicClient.readContract({ address: market.address, abi: marketAbi, functionName: "getPoolSizes" }),
+        publicClient.readContract({ address: market.address, abi: marketAbi, functionName: "getParticipantCounts" })
+      ]);
+      return { ...base, kind: "live" as const, status: "available" as const, address: market.address, startTime: market.startTime.toString(), endTime: market.endTime.toString(), timeRemaining: Math.max(0, Number(market.endTime) - now), yesPool: pools[0].toString(), noPool: pools[1].toString(), yesParticipants: participants[0].toString(), noParticipants: participants[1].toString() };
+    } catch (error) {
+      console.error(JSON.stringify({ service: "api", action: "market_slot_unavailable", slotId: slot.slotId, feed: slot.feed, market: market.address, reason: "market_data_unavailable", error: String(error) }));
+      return unavailable("market_data_unavailable", "live");
+    }
   });
   const value = { markets: values, cachedAt: new Date().toISOString() };
   marketCache = { value, expiresAt: Date.now() + marketCacheTtlMs };
@@ -301,6 +340,10 @@ app.post("/markets/:address/comments", auth, async (req, res) => {
 
 export async function initializeApi() {
   await initializeDatabase();
+  if (!runtimeConfigLogged) {
+    runtimeConfigLogged = true;
+    console.info(JSON.stringify({ service: "api", action: "runtime_config", rpcUrl: sanitizedRpcUrl(), chainId: chain.id, feeds }));
+  }
 }
 
 export default app;

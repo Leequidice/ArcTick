@@ -4,6 +4,12 @@
   "installCommand": "npm ci && npm --prefix web ci",
   "buildCommand": "npm run build:web",
   "outputDirectory": "web/dist",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/[...path]?path=:path*"
+    }
+  ],
   "functions": {
     "api/[...path].ts": {
       "maxDuration": 60

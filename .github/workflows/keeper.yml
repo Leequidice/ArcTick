@@ -23,7 +23,7 @@ jobs:
       VAULT_ADDRESS: ${{ secrets.VAULT_ADDRESS }}
       KEEPER_PRIVATE_KEY: ${{ secrets.KEEPER_PRIVATE_KEY }}
       INTERNAL_KEEPER_SECRET: ${{ secrets.INTERNAL_KEEPER_SECRET }}
-      SETTLEMENT_API_URL: https://arctick.vercel.app/api/internal/settle
+      SETTLEMENT_API_URL: https://arctick.vercel.app/api/settle
       KEEPER_RUN_ONCE: "true"
       KEEPER_PID_FILE: ${{ runner.temp }}/arctick-keeper.pid
     steps:
