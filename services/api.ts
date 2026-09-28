@@ -178,10 +178,13 @@ async function loadOpenMarkets() {
   const feedIndices = new Map(uniqueFeeds.map((feed, index) => [feed, index]));
   type BatchOutcome<T> = { status: "success"; result: T } | { status: "failure"; error: Error };
   type RoundData = readonly [bigint, bigint, bigint, bigint, bigint];
+  type MarketSnapshot = { address: Address; startTime: bigint; endTime: bigint; resolved: boolean };
   let roundResults: BatchOutcome<RoundData>[] | undefined;
   let roundBatchError: unknown;
   let marketResults: BatchOutcome<Address>[] | undefined;
   let marketBatchError: unknown;
+  let marketDetails: BatchOutcome<unknown>[] | undefined;
+  let marketDetailsError: unknown;
   if (chain.id === 5042) {
     try {
       roundResults = await publicClient.multicall({
@@ -197,6 +200,33 @@ async function loadOpenMarkets() {
         multicallAddress: multicall3Address
       }) as unknown as BatchOutcome<Address>[];
     } catch (error) { marketBatchError = error; }
+    if (marketResults) {
+      const marketDetailCalls = marketResults.flatMap(item => item.status === "success" && item.result !== zeroAddress ? [
+        { address: item.result, abi: marketAbi, functionName: "startTime" as const },
+        { address: item.result, abi: marketAbi, functionName: "endTime" as const },
+        { address: item.result, abi: marketAbi, functionName: "resolved" as const }
+      ] : []);
+      if (marketDetailCalls.length) {
+        try {
+          marketDetails = await publicClient.multicall({ contracts: marketDetailCalls, allowFailure: true, multicallAddress: multicall3Address }) as unknown as BatchOutcome<unknown>[];
+        } catch (error) { marketDetailsError = error; }
+      } else marketDetails = [];
+    }
+  }
+  const marketSnapshots = new Map<number, MarketSnapshot | Error>();
+  if (marketResults && marketDetails) {
+    let detailIndex = 0;
+    marketResults.forEach((item, slotIndex) => {
+      if (item.status !== "success" || item.result === zeroAddress) return;
+      const [start, end, resolved] = marketDetails!.slice(detailIndex, detailIndex + 3);
+      detailIndex += 3;
+      if (start?.status === "success" && end?.status === "success" && resolved?.status === "success") {
+        marketSnapshots.set(slotIndex, { address: item.result, startTime: start.result as bigint, endTime: end.result as bigint, resolved: resolved.result as boolean });
+      } else {
+        const failed = [start, end, resolved].find(result => result?.status === "failure") as BatchOutcome<unknown> | undefined;
+        marketSnapshots.set(slotIndex, new Error(failed?.status === "failure" ? String(failed.error) : String(marketDetailsError ?? "market_details_read_failed")));
+      }
+    });
   }
   const values = await mapConcurrent(slots, 3, async slot => {
     const index = slots.indexOf(slot);
@@ -208,7 +238,17 @@ async function loadOpenMarkets() {
         ? roundBatchItem?.status === "success" ? Promise.resolve(roundBatchItem.result) : Promise.reject(roundBatchItem?.status === "failure" ? roundBatchItem.error : roundBatchError ?? new Error("multicall_feed_read_failed"))
         : publicClient.readContract({ address: slot.feed, abi: aggregatorAbi, functionName: "latestRoundData" }),
         marketResults
-        ? marketBatchItem?.status === "success" ? openMarketForSlot(slot, marketBatchItem.result) : Promise.reject(marketBatchItem?.status === "failure" ? marketBatchItem.error : marketBatchError ?? new Error("multicall_market_lookup_failed"))
+        ? marketBatchItem?.status === "success"
+          ? marketBatchItem.result === zeroAddress
+            ? Promise.resolve(undefined)
+            : (() => {
+                const snapshot = marketSnapshots.get(index);
+                if (!snapshot) return Promise.reject(marketDetailsError ?? new Error("multicall_market_details_failed"));
+                if (snapshot instanceof Error) return Promise.reject(snapshot);
+                if (snapshot.resolved || snapshot.endTime <= BigInt(now)) return Promise.resolve(undefined);
+                return Promise.resolve({ address: snapshot.address, startTime: snapshot.startTime, endTime: snapshot.endTime });
+              })()
+          : Promise.reject(marketBatchItem?.status === "failure" ? marketBatchItem.error : marketBatchError ?? new Error("multicall_market_lookup_failed"))
         : openMarketForSlot(slot)
     ]);
     const round = roundResult.status === "fulfilled" ? roundResult.value : undefined;
