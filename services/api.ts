@@ -58,7 +58,7 @@ app.use((_req, res, next) => {
   next();
 });
 app.use(express.json());
-app.get("/health", (_req, res) => res.json({ status: "ok" }));
+app.get("/health", (_req, res) => res.json({ status: "ok", chainId: chain.id, rpcUrl: sanitizedRpcUrl(), feedAddresses: feeds }));
 
 // Keeper-to-API channel only. This credential is separate from user JWTs and
 // is never returned to a client or included in logs.
