@@ -1,9 +1,13 @@
 name: ArcTick keeper
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Read-only scan; report actions without sending transactions or calling settlement API"
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -21,10 +25,11 @@ jobs:
       ARC_RPC_URL: ${{ secrets.ARC_RPC_URL }}
       FACTORY_ADDRESS: ${{ secrets.FACTORY_ADDRESS }}
       VAULT_ADDRESS: ${{ secrets.VAULT_ADDRESS }}
-      KEEPER_PRIVATE_KEY: ${{ secrets.KEEPER_PRIVATE_KEY }}
-      INTERNAL_KEEPER_SECRET: ${{ secrets.INTERNAL_KEEPER_SECRET }}
+      KEEPER_PRIVATE_KEY: ${{ (github.event_name != 'workflow_dispatch' || !inputs.dry_run) && secrets.KEEPER_PRIVATE_KEY || '' }}
+      INTERNAL_KEEPER_SECRET: ${{ (github.event_name != 'workflow_dispatch' || !inputs.dry_run) && secrets.INTERNAL_KEEPER_SECRET || '' }}
       SETTLEMENT_API_URL: https://arctick.vercel.app/api/settle
       KEEPER_RUN_ONCE: "true"
+      KEEPER_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,12 +39,20 @@ jobs:
       - name: Check required secrets are configured
         shell: bash
         run: |
-          for name in ARC_CHAIN_ID ARC_RPC_URL FACTORY_ADDRESS VAULT_ADDRESS KEEPER_PRIVATE_KEY INTERNAL_KEEPER_SECRET; do
+          for name in ARC_CHAIN_ID ARC_RPC_URL FACTORY_ADDRESS VAULT_ADDRESS; do
             if [[ -z "${!name}" ]]; then
               echo "::error title=Missing GitHub Actions secret::$name is not configured"
               exit 1
             fi
           done
+          if [[ "$KEEPER_DRY_RUN" != "true" ]]; then
+            for name in KEEPER_PRIVATE_KEY INTERNAL_KEEPER_SECRET; do
+              if [[ -z "${!name}" ]]; then
+                echo "::error title=Missing GitHub Actions secret::$name is not configured"
+                exit 1
+              fi
+            done
+          fi
       - run: npm ci
       - name: Resolve markets and request API settlement
         env:
