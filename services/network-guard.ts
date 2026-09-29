@@ -24,6 +24,6 @@ export function evaluateChainStatus(expected: number, configured: number, actual
 
 export function isNetworkGuardedRequest(method: string, path: string) {
   const verb = method.toUpperCase();
-  return (verb === "GET" && (path === "/markets" || path === "/balance")) ||
+  return (verb === "GET" && (path === "/markets" || path === "/balance" || path === "/positions")) ||
     (verb === "POST" && ["/swipe", "/settle", "/deposit", "/withdraw"].includes(path));
 }

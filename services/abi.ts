@@ -13,9 +13,12 @@ export const marketAbi = [
   { type: "function", name: "factory", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
   { type: "function", name: "usdc", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
   { type: "function", name: "assetPair", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
+  { type: "function", name: "duration", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
   { type: "function", name: "startTime", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
   { type: "function", name: "endTime", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
   { type: "function", name: "resolved", stateMutability: "view", inputs: [], outputs: [{ type: "bool" }] },
+  { type: "function", name: "yesWon", stateMutability: "view", inputs: [], outputs: [{ type: "bool" }] },
+  { type: "function", name: "refunded", stateMutability: "view", inputs: [], outputs: [{ type: "bool" }] },
   { type: "function", name: "priceFeed", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
   { type: "function", name: "getPoolSizes", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }, { type: "uint256" }] },
   { type: "function", name: "getParticipantCounts", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }, { type: "uint256" }] },
@@ -29,6 +32,7 @@ export const vaultAbi = [
   { type: "function", name: "operatorSettleMarket", stateMutability: "nonpayable", inputs: [{ type: "address" }], outputs: [] },
   { type: "function", name: "getMarketParticipants", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "address[]" }] },
   { type: "function", name: "marketSettled", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "bool" }] },
+  { type: "function", name: "positions", stateMutability: "view", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "uint256" }, { type: "uint256" }, { type: "bool" }] },
   { type: "function", name: "withdraw", stateMutability: "nonpayable", inputs: [{ type: "uint256" }], outputs: [] }
 ] as const;
 

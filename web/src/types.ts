@@ -1,3 +1,4 @@
 export type Market = { slotId: string; kind: "virtual" | "live" | "unavailable"; status?: "available" | "unavailable"; unavailableReason?: string; address?: string; assetPair: string; feedAddress: string; price: string | null; priceUpdatedAt: string | null; startTime?: string; endTime?: string; duration: string; timeRemaining: number; yesPool: string | null; noPool: string | null; yesParticipants: string | null; noParticipants: string | null };
 export type Session = { token: string; address: string; custodial: boolean };
 export type Comment = { id: string; address: string; text: string; createdAt: string };
+export type Position = { marketAddress: string; assetPair: string; duration: string; side: "YES" | "NO"; amount: string; status: "open" | "resolved" | "settled" | "awaiting_resolution"; timeRemaining: number; transactionHash: string | null };

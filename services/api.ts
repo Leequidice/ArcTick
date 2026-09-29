@@ -12,7 +12,7 @@ import { configuredFeeds } from "./network-feeds.js";
 import { evaluateChainStatus, expectedChainId, isNetworkGuardedRequest, type ChainStatus } from "./network-guard.js";
 import { isValidInternalSecret } from "./internal-auth.js";
 import { safeTransactionError, transactionFailureCode, transactionFailureMessage, type TransactionStage } from "./tx-diagnostics.js";
-import { consumeWalletNonce, createGoogleUser, getOrCreateConnectedUser, getUserByAddress, getUserByGoogleSub, getUserById, initializeDatabase, pool, setWalletNonce, withOperatorTransactionLock, type User } from "./database.js";
+import { consumeWalletNonce, createGoogleUser, getOrCreateConnectedUser, getPositionTransactionHashes, getUserByAddress, getUserByGoogleSub, getUserById, initializeDatabase, pool, recordPositionTransaction, setWalletNonce, withOperatorTransactionLock, type User } from "./database.js";
 
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error(`Missing ${name}`); return value; };
 const rpc = required("ARC_RPC_URL");
@@ -350,6 +350,64 @@ app.post("/wallet/connect", async (req, res) => {
 
 app.get("/balance", auth, async (_req, res) => { const user: User = res.locals.user; const balance = await publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "balances", args: [user.address] }); res.json({ address: user.address, balance: balance.toString(), decimals: 6 }); });
 app.get("/markets", async (_req, res) => { try { res.json(await openMarkets()); } catch (error) { res.status(503).json({ error: "markets_unavailable", detail: String(error) }); } });
+app.get("/positions", auth, async (_req, res) => {
+  try {
+    const user: User = res.locals.user;
+    const total = await publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "marketCount" });
+    const addresses: Address[] = [];
+    for (let start = 0n; start < total; start += 80n) {
+      const indices = Array.from({ length: Number(total - start > 80n ? 80n : total - start) }, (_, i) => start + BigInt(i));
+      const results = await publicClient.multicall({
+        contracts: indices.map(index => ({ address: factory, abi: factoryAbi, functionName: "markets" as const, args: [index] as const })),
+        allowFailure: true,
+        multicallAddress: multicall3Address
+      });
+      for (const result of results) if (result.status === "success") addresses.push(result.result);
+    }
+
+    const userPositions: { market: Address; yesStake: bigint; noStake: bigint }[] = [];
+    for (let start = 0; start < addresses.length; start += 80) {
+      const batch = addresses.slice(start, start + 80);
+      const results = await publicClient.multicall({
+        contracts: batch.map(market => ({ address: vault, abi: vaultAbi, functionName: "positions" as const, args: [market, user.address] as const })),
+        allowFailure: true,
+        multicallAddress: multicall3Address
+      });
+      results.forEach((result, index) => {
+        if (result.status !== "success") return;
+        const [yesStake, noStake] = result.result as readonly [bigint, bigint, boolean];
+        if (yesStake > 0n || noStake > 0n) userPositions.push({ market: batch[index], yesStake, noStake });
+      });
+    }
+
+    const txHashes = await getPositionTransactionHashes(user.id);
+    const now = Math.floor(Date.now() / 1000);
+    const positions = [];
+    for (let start = 0; start < userPositions.length; start += 10) {
+      const batch = userPositions.slice(start, start + 10);
+      const metadata = await Promise.all(batch.map(async position => {
+        const [assetPair, duration, endTime, resolved, settled] = await Promise.all([
+          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "assetPair" }),
+          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "duration" }),
+          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "endTime" }),
+          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "resolved" }),
+          publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "marketSettled", args: [position.market] })
+        ]);
+        const status = settled ? "settled" : resolved ? "resolved" : endTime > BigInt(now) ? "open" : "awaiting_resolution";
+        return { ...position, assetPair, duration: duration.toString(), endTime: endTime.toString(), status,
+          timeRemaining: status === "open" ? Number(endTime) - now : 0 };
+      }));
+      for (const position of metadata) {
+        if (position.yesStake > 0n) positions.push({ marketAddress: position.market, assetPair: position.assetPair, duration: position.duration, side: "YES", amount: position.yesStake.toString(), status: position.status, timeRemaining: position.timeRemaining, transactionHash: txHashes.get(`${position.market.toLowerCase()}:YES`) ?? null });
+        if (position.noStake > 0n) positions.push({ marketAddress: position.market, assetPair: position.assetPair, duration: position.duration, side: "NO", amount: position.noStake.toString(), status: position.status, timeRemaining: position.timeRemaining, transactionHash: txHashes.get(`${position.market.toLowerCase()}:NO`) ?? null });
+      }
+    }
+    res.json({ positions });
+  } catch (error) {
+    console.error(JSON.stringify({ service: "api", action: "positions_read_failed", error: safeTransactionError(error) }));
+    res.status(503).json({ error: "positions_unavailable" });
+  }
+});
 
 app.post("/deposit", auth, async (req, res) => {
   let stage: TransactionStage = "wallet_approve";
@@ -437,6 +495,11 @@ app.post("/swipe", auth, async (req, res) => {
       return submitted;
     });
     marketCache = undefined;
+    try {
+      await recordPositionTransaction(user.id, selected.market, body.isYes ? "YES" : "NO", amount.toString(), hash);
+    } catch (error) {
+      console.error(JSON.stringify({ service: "api", action: "position_transaction_record_failed", market: selected.market, error: safeTransactionError(error) }));
+    }
     res.status(202).json({ transactionHash: hash, marketAddress: selected.market, created: selected.created, status: "submitted" });
   } catch (error) {
     if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Swipe request is invalid." });

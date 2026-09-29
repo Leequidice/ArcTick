@@ -1,0 +1,17 @@
+.header-actions { display: flex; align-items: center; gap: 7px; }
+.positions-button { background: transparent; border: 0; color: #d7ff56; font-size: .76rem; font-weight: 700; padding: 8px 2px; }
+.positions-screen { justify-content: flex-start; }
+.positions-screen h1 { font-size: 3rem; margin: 1.2rem 0; }
+.position-list { display: grid; gap: 10px; overflow: auto; padding-bottom: 20px; }
+.position { background: #11141c; border: 1px solid #292d38; border-radius: 15px; padding: 14px; }
+.position-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.position-heading b { font-size: .9rem; }
+.position-heading span, .position p { color: #9ca3af; font-size: .78rem; }
+.position .yes { color: #d7ff56; font-weight: 800; }
+.position .no { color: #f79b9b; font-weight: 800; }
+.position-status { text-transform: capitalize; }
+.position p { margin: 12px 0; }
+.tx-link, .toast-hash { display: block; color: #bdcf88; font-size: .68rem; overflow-wrap: anywhere; margin-top: 10px; }
+.toast { max-width: calc(100vw - 32px); border-radius: 14px; }
+.toast-hash { color: #d7ff56; }
+@media (max-width: 400px) { .header-actions { gap: 4px; } .positions-button { font-size: .68rem; } .balance { padding: 7px 8px; } }

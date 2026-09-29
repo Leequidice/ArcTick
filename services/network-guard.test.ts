@@ -20,6 +20,7 @@ test("chain status fails closed for RPC mismatch, config mismatch, and unreadabl
 
 test("markets, funds, swipe, and settlement are network-guarded", () => {
   assert.equal(isNetworkGuardedRequest("GET", "/markets"), true);
+  assert.equal(isNetworkGuardedRequest("GET", "/positions"), true);
   assert.equal(isNetworkGuardedRequest("POST", "/swipe"), true);
   assert.equal(isNetworkGuardedRequest("POST", "/settle"), true);
   assert.equal(isNetworkGuardedRequest("POST", "/internal/settle"), false);

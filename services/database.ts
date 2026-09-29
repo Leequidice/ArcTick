@@ -85,8 +85,38 @@ async function initializeDatabaseOnce() {
     );
     CREATE INDEX IF NOT EXISTS comments_market_created_idx
       ON comments (market_address, created_at, id);
+
+    CREATE TABLE IF NOT EXISTS position_transactions (
+      id uuid PRIMARY KEY,
+      user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      market_address text NOT NULL,
+      side text NOT NULL CHECK (side IN ('YES', 'NO')),
+      amount numeric(78, 0) NOT NULL,
+      transaction_hash text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS position_transactions_user_recent_idx
+      ON position_transactions (user_id, created_at DESC);
   `);
   await pool.query("SELECT 1");
+}
+
+export async function recordPositionTransaction(userId: string, marketAddress: string, side: "YES" | "NO", amount: string, transactionHash: string) {
+  await pool.query(
+    `INSERT INTO position_transactions (id, user_id, market_address, side, amount, transaction_hash)
+     VALUES ($1, $2, lower($3), $4, $5, $6)`,
+    [randomUUID(), userId, marketAddress, side, amount, transactionHash]
+  );
+}
+
+export async function getPositionTransactionHashes(userId: string): Promise<Map<string, string>> {
+  const result = await pool.query<{ market_address: string; side: "YES" | "NO"; transaction_hash: string }>(
+    `SELECT DISTINCT ON (market_address, side) market_address, side, transaction_hash
+     FROM position_transactions WHERE user_id = $1
+     ORDER BY market_address, side, created_at DESC`,
+    [userId]
+  );
+  return new Map(result.rows.map(row => [`${row.market_address.toLowerCase()}:${row.side}`, row.transaction_hash]));
 }
 
 export async function getUserById(id: string): Promise<User | undefined> {
