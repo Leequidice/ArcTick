@@ -14,3 +14,12 @@ test("redacts RPC credentials and long hexadecimal values from diagnostics", () 
   assert.doesNotMatch(message, /key=secret|a{40}/i);
   assert.match(message, /rpc endpoint redacted/);
 });
+
+test("classifies and reports the deepest wrapped RPC failure", () => {
+  const error = Object.assign(new Error("Transaction creation failed."), {
+    shortMessage: "Transaction creation failed.",
+    cause: new Error("insufficient funds for gas * price + value")
+  });
+  assert.equal(transactionFailureCode("wallet_approve", error), "wallet_funding_low");
+  assert.match(safeTransactionError(error), /insufficient funds for gas/);
+});

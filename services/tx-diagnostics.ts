@@ -1,4 +1,4 @@
-type ErrorWithDetails = Error & { shortMessage?: unknown };
+type ErrorWithDetails = Error & { shortMessage?: unknown; cause?: unknown };
 
 export type TransactionStage = "wallet_approve" | "vault_deposit" | "market_create" | "place_bet";
 
@@ -22,12 +22,18 @@ export function safeTransactionError(error: unknown): string {
 }
 
 function errorText(error: unknown): string {
-  if (error && typeof error === "object") {
-    const detailed = error as ErrorWithDetails;
-    if (typeof detailed.shortMessage === "string" && detailed.shortMessage) return detailed.shortMessage;
-    if (typeof detailed.message === "string" && detailed.message) return `${detailed.name || "Error"}: ${detailed.message}`;
+  let current = error;
+  let deepestMessage = "";
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 8 && current && typeof current === "object" && !seen.has(current); depth++) {
+    seen.add(current);
+    const detailed = current as ErrorWithDetails;
+    if (typeof detailed.shortMessage === "string" && detailed.shortMessage) deepestMessage = detailed.shortMessage;
+    else if (typeof detailed.message === "string" && detailed.message) deepestMessage = `${detailed.name || "Error"}: ${detailed.message}`;
+    if (!detailed.cause || typeof detailed.cause !== "object") break;
+    current = detailed.cause;
   }
-  return String(error);
+  return deepestMessage || String(current ?? error);
 }
 
 export function transactionFailureMessage(code: string): string {
