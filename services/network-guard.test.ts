@@ -36,11 +36,13 @@ test("keeper verifies chain before lock acquisition and tick work", () => {
   assert.match(source, /misconfigured_network/);
 });
 
-test("the API exposes only one settlement route and health omits RPC URL", () => {
+test("health omits RPC URL and exposes only the public API signer address", () => {
   const source = readFileSync(new URL("./api.ts", import.meta.url), "utf8");
   assert.match(source, /app\.post\("\/settle"/);
   assert.doesNotMatch(source, /app\.post\("\/internal\/settle"/);
   assert.match(source, /actualChainId: status\.actualChainId/);
   assert.match(source, /rpcHostname: rpcHostname\(\)/);
+  assert.match(source, /apiSignerAddress: operator\.address/);
+  assert.doesNotMatch(source, /apiSignerAddress: .*PRIVATE_KEY/);
   assert.doesNotMatch(source, /rpcUrl:/);
 });
