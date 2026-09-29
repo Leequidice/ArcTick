@@ -1,4 +1,11 @@
-type ErrorWithDetails = Error & { shortMessage?: unknown; cause?: unknown };
+type ErrorWithDetails = Error & Record<string, unknown> & {
+  shortMessage?: unknown;
+  cause?: unknown;
+  details?: unknown;
+  reason?: unknown;
+  data?: unknown;
+  metaMessages?: unknown;
+};
 
 export type TransactionStage = "wallet_approve" | "vault_deposit" | "market_create" | "place_bet";
 
@@ -13,12 +20,8 @@ export function transactionFailureCode(stage: TransactionStage, error: unknown):
 }
 
 export function safeTransactionError(error: unknown): string {
-  return errorText(error)
-    .replace(/https?:\/\/[^\s"'<>)}\]]+/gi, "[rpc endpoint redacted]")
-    .replace(/0x[a-f\d]{40,}/gi, "[hex value redacted]")
-    .replace(/(private[ _-]?key|secret|token|authorization)(\s*[:=]\s*)[^\s,;]+/gi, "$1$2[redacted]")
-    .replace(/\s+/g, " ")
-    .slice(0, 240);
+  const diagnostic = serializeError(error, 0, new Set());
+  return JSON.stringify(redactSensitive(diagnostic)).slice(0, 4_000);
 }
 
 function errorText(error: unknown): string {
@@ -34,6 +37,50 @@ function errorText(error: unknown): string {
     current = detailed.cause;
   }
   return deepestMessage || String(current ?? error);
+}
+
+// Retain the outer viem message and nested cause fields: shortMessage alone is
+// often only the generic "RPC Request failed" wrapper. Never serialize request
+// objects or headers, which may contain credentials.
+function serializeError(value: unknown, depth: number, seen: Set<unknown>): unknown {
+  if (depth > 7) return "[cause depth limit]";
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value !== "object") return String(value);
+  if (seen.has(value)) return "[circular cause]";
+  seen.add(value);
+
+  if (Array.isArray(value)) return value.slice(0, 20).map(item => serializeError(item, depth + 1, seen));
+  const error = value as ErrorWithDetails;
+  const output: Record<string, unknown> = {};
+  const fields = ["name", "message", "shortMessage", "details", "reason", "revertReason", "errorName", "code", "data", "metaMessages", "signature", "args", "cause"] as const;
+  for (const field of fields) {
+    const fieldValue = field === "name" && error[field] === undefined ? error.constructor?.name : error[field];
+    if (fieldValue !== undefined && fieldValue !== null) output[field] = serializeError(fieldValue, depth + 1, seen);
+  }
+  return output;
+}
+
+function redactSensitive(value: unknown): unknown {
+  if (typeof value === "string") {
+    return value
+      .replace(/https?:\/\/[^\s"'<>)}\]]+/gi, rawUrl => {
+        try {
+          const url = new URL(rawUrl);
+          url.username = "";
+          url.password = "";
+          for (const key of [...url.searchParams.keys()]) {
+            if (/key|token|secret|auth|password|credential/i.test(key)) url.searchParams.set(key, "[redacted]");
+          }
+          return url.toString();
+        } catch {
+          return "[invalid URL redacted]";
+        }
+      })
+      .replace(/(private[ _-]?key|authorization)(\s*[:=]\s*)[^\s,;]+/gi, "$1$2[redacted]");
+  }
+  if (Array.isArray(value)) return value.map(redactSensitive);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSensitive(item)]));
+  return value;
 }
 
 export function transactionFailureMessage(code: string): string {

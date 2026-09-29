@@ -9,10 +9,21 @@ test("classifies insufficient Vault stake balance for a failed bet", () => {
   assert.match(transactionFailureMessage(code), /Deposit USDC into the Vault/);
 });
 
-test("redacts RPC credentials and long hexadecimal values from diagnostics", () => {
-  const message = safeTransactionError(new Error("failed https://rpc.example/rpc?key=secret 0x" + "a".repeat(64)));
-  assert.doesNotMatch(message, /key=secret|a{40}/i);
-  assert.match(message, /rpc endpoint redacted/);
+test("keeps revert details while redacting embedded RPC credentials and private keys", () => {
+  const error = Object.assign(new Error("RPC Request failed."), {
+    shortMessage: "RPC Request failed.",
+    cause: Object.assign(new Error("execution reverted"), {
+      reason: "InsufficientBalance",
+      data: "0x" + "a".repeat(64),
+      details: "POST https://rpc.example/rpc?api-key=secret",
+      privateKey: "0x" + "b".repeat(64)
+    })
+  });
+  const message = safeTransactionError(error);
+  assert.match(message, /InsufficientBalance/);
+  assert.match(message, /0x[a]{64}/i);
+  assert.doesNotMatch(message, /api-key=secret|b{64}/i);
+  assert.match(message, /api-key=%5Bredacted%5D/i);
 });
 
 test("classifies and reports the deepest wrapped RPC failure", () => {

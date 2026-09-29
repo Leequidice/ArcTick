@@ -417,12 +417,18 @@ async function marketForSwipe(slot: Slot): Promise<SelectedMarket> {
 
 app.post("/swipe", auth, async (req, res) => {
   let stage: TransactionStage = "market_create";
+  let requestedSlotId: string | undefined;
+  let targetMarketAddress: Address | undefined;
+  let marketCreated: boolean | undefined;
   try {
     const user: User = res.locals.user;
     const body = z.object({ slotId: z.string(), isYes: z.boolean(), amount: z.union([z.string(), z.number()]) }).parse(req.body);
+    requestedSlotId = body.slotId;
     const slot = slotById.get(body.slotId); if (!slot) return res.status(400).json({ error: "unknown_market_slot" });
     const amount = typeof body.amount === "string" ? BigInt(body.amount) : parseUnits(String(body.amount), 6);
     const selected = await marketForSwipe(slot);
+    targetMarketAddress = selected.market;
+    marketCreated = selected.created;
     stage = "place_bet";
     const hash = await withOperatorTransactionLock(async () => {
       const submitted = await operatorClient.writeContract({ address: vault, abi: vaultAbi, functionName: "operatorPlaceBet", args: [user.address, selected.market, body.isYes, amount] });
@@ -436,7 +442,7 @@ app.post("/swipe", auth, async (req, res) => {
     if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Swipe request is invalid." });
     const diagnosticId = randomUUID();
     const code = transactionFailureCode(stage, error);
-    console.error(JSON.stringify({ service: "api", action: "swipe_failed", diagnosticId, stage, code, error: safeTransactionError(error) }));
+    console.error(JSON.stringify({ service: "api", action: "swipe_failed", diagnosticId, stage, code, requestedSlotId, targetMarketAddress, marketCreated, error: safeTransactionError(error) }));
     res.status(400).json({ error: "swipe_failed", code, message: transactionFailureMessage(code), diagnosticId });
   }
 });
