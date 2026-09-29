@@ -353,6 +353,7 @@ app.get("/markets", async (_req, res) => { try { res.json(await openMarkets()); 
 
 app.post("/deposit", auth, async (req, res) => {
   let stage: TransactionStage = "wallet_approve";
+  let signerAddress: Address | undefined;
   try {
     const user: User = res.locals.user; const value = amount(z.object({ amount: z.union([z.string(), z.number()]) }).parse(req.body).amount);
     if (user.mode === "connected") return res.status(409).json({ error: "wallet_signature_required", message: "Approve and deposit from your connected wallet.", transactions: [
@@ -360,6 +361,7 @@ app.post("/deposit", auth, async (req, res) => {
       { to: vault, data: encodeFunctionData({ abi: vaultAbi, functionName: "deposit", args: [value] }) }
     ] });
     const account = privateKeyToAccount(decrypt(user.encryptedKey!) as `0x${string}`);
+    signerAddress = account.address;
     const client = createWalletClient({ account, chain, transport: http(rpc) });
     const approvalHash = await client.writeContract({ address: usdc, abi: usdcAbi, functionName: "approve", args: [vault, value] });
     await publicClient.waitForTransactionReceipt({ hash: approvalHash });
@@ -370,7 +372,7 @@ app.post("/deposit", auth, async (req, res) => {
     if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Deposit request is invalid." });
     const diagnosticId = randomUUID();
     const code = transactionFailureCode(stage, error);
-    console.error(JSON.stringify({ service: "api", action: "deposit_failed", diagnosticId, stage, code, error: safeTransactionError(error) }));
+    console.error(JSON.stringify({ service: "api", action: "deposit_failed", diagnosticId, stage, code, signerAddress, tokenAddress: usdc, approvalSpender: vault, error: safeTransactionError(error) }));
     res.status(400).json({ error: "deposit_failed", code, message: transactionFailureMessage(code), diagnosticId });
   }
 });
