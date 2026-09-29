@@ -11,6 +11,7 @@ import { DURATIONS } from "./feeds.js";
 import { configuredFeeds } from "./network-feeds.js";
 import { evaluateChainStatus, expectedChainId, isNetworkGuardedRequest, type ChainStatus } from "./network-guard.js";
 import { isValidInternalSecret } from "./internal-auth.js";
+import { safeTransactionError, transactionFailureCode, transactionFailureMessage, type TransactionStage } from "./tx-diagnostics.js";
 import { consumeWalletNonce, createGoogleUser, getOrCreateConnectedUser, getUserByAddress, getUserByGoogleSub, getUserById, initializeDatabase, pool, setWalletNonce, withOperatorTransactionLock, type User } from "./database.js";
 
 const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return value; };
@@ -351,6 +352,7 @@ app.get("/balance", auth, async (_req, res) => { const user: User = res.locals.u
 app.get("/markets", async (_req, res) => { try { res.json(await openMarkets()); } catch (error) { res.status(503).json({ error: "markets_unavailable", detail: String(error) }); } });
 
 app.post("/deposit", auth, async (req, res) => {
+  let stage: TransactionStage = "wallet_approve";
   try {
     const user: User = res.locals.user; const value = amount(z.object({ amount: z.union([z.string(), z.number()]) }).parse(req.body).amount);
     if (user.mode === "connected") return res.status(409).json({ error: "wallet_signature_required", message: "Approve and deposit from your connected wallet.", transactions: [
@@ -361,11 +363,15 @@ app.post("/deposit", auth, async (req, res) => {
     const client = createWalletClient({ account, chain, transport: http(rpc) });
     const approvalHash = await client.writeContract({ address: usdc, abi: usdcAbi, functionName: "approve", args: [vault, value] });
     await publicClient.waitForTransactionReceipt({ hash: approvalHash });
+    stage = "vault_deposit";
     const transactionHash = await client.writeContract({ address: vault, abi: vaultAbi, functionName: "deposit", args: [value] });
     res.status(202).json({ approvalHash, transactionHash, status: "submitted" });
   } catch (error) {
     if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Deposit request is invalid." });
-    res.status(400).json({ error: "deposit_failed", detail: String(error) });
+    const diagnosticId = randomUUID();
+    const code = transactionFailureCode(stage, error);
+    console.error(JSON.stringify({ service: "api", action: "deposit_failed", diagnosticId, stage, code, error: safeTransactionError(error) }));
+    res.status(400).json({ error: "deposit_failed", code, message: transactionFailureMessage(code), diagnosticId });
   }
 });
 
@@ -408,12 +414,14 @@ async function marketForSwipe(slot: Slot): Promise<SelectedMarket> {
 }
 
 app.post("/swipe", auth, async (req, res) => {
+  let stage: TransactionStage = "market_create";
   try {
     const user: User = res.locals.user;
     const body = z.object({ slotId: z.string(), isYes: z.boolean(), amount: z.union([z.string(), z.number()]) }).parse(req.body);
     const slot = slotById.get(body.slotId); if (!slot) return res.status(400).json({ error: "unknown_market_slot" });
     const amount = typeof body.amount === "string" ? BigInt(body.amount) : parseUnits(String(body.amount), 6);
     const selected = await marketForSwipe(slot);
+    stage = "place_bet";
     const hash = await withOperatorTransactionLock(async () => {
       const submitted = await operatorClient.writeContract({ address: vault, abi: vaultAbi, functionName: "operatorPlaceBet", args: [user.address, selected.market, body.isYes, amount] });
       const receipt = await publicClient.waitForTransactionReceipt({ hash: submitted });
@@ -424,7 +432,10 @@ app.post("/swipe", auth, async (req, res) => {
     res.status(202).json({ transactionHash: hash, marketAddress: selected.market, created: selected.created, status: "submitted" });
   } catch (error) {
     if (error instanceof z.ZodError) return res.status(400).json({ error: "invalid_request", message: "Swipe request is invalid." });
-    res.status(400).json({ error: "swipe_failed", detail: String(error) });
+    const diagnosticId = randomUUID();
+    const code = transactionFailureCode(stage, error);
+    console.error(JSON.stringify({ service: "api", action: "swipe_failed", diagnosticId, stage, code, error: safeTransactionError(error) }));
+    res.status(400).json({ error: "swipe_failed", code, message: transactionFailureMessage(code), diagnosticId });
   }
 });
 

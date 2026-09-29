@@ -111,12 +111,32 @@ export function App() {
   const [markets, setMarkets] = useState<Market[]>([]); const [index, setIndex] = useState(0); const [tab, setTab] = useState<"Trading" | "Prediction">("Trading"); const [amount, setAmount] = useState("1"); const [balance, setBalance] = useState("0"); const [detail, setDetail] = useState<Market>(); const [comments, setComments] = useState<(Market & { address: string })>(); const [toast, setToast] = useState("");
   const visibleMarkets = useMemo(() => markets.filter(market => tab === "Trading" ? market.duration !== "3600" : market.duration === "3600"), [markets, tab]);
   const current = visibleMarkets[index];
-  const refresh = async () => { try { const result = await api.getMarkets(); setMarkets(result.markets); if (session) setBalance((await api.getBalance(session)).balance); } catch { setToast("Live markets are temporarily unavailable"); } };
+  const refresh = async () => {
+    try {
+      const result = await api.getMarkets();
+      setMarkets(result.markets);
+    } catch (error) {
+      console.error("ArcTick markets refresh failed", error);
+      setToast("Live markets are temporarily unavailable");
+      window.setTimeout(() => setToast(current => current === "Live markets are temporarily unavailable" ? "" : current), 2200);
+    }
+
+    if (session) {
+      try {
+        const result = await api.getBalance(session);
+        setBalance(result.balance);
+      } catch (error) {
+        console.error("ArcTick balance refresh failed", error);
+        setToast("Balance couldn’t be refreshed");
+        window.setTimeout(() => setToast(current => current === "Balance couldn’t be refreshed" ? "" : current), 2200);
+      }
+    }
+  };
   useEffect(() => { if (!session || view !== "feed") return; refresh(); const timer = window.setInterval(refresh, 8_000); return () => clearInterval(timer); }, [session, view]);
   function setNewSession(next: Session) { localStorage.setItem("arctick-session", JSON.stringify(next)); setSession(next); setView(next.custodial && !localStorage.getItem("arctick-warning") ? "warning" : "feed"); }
   function logout() { localStorage.removeItem("arctick-session"); setSession(undefined); setView("landing"); }
   function advance() { setIndex(value => value + 1); }
-  async function buyYes() { if (!session || !current) return; const target = current; advance(); try { const result = await api.swipe(session, target.slotId, String(Math.round(Number(amount) * 1_000_000))); setToast(result.created ? "✓ Market opened + YES submitted" : "✓ YES submitted"); refresh(); } catch { setToast("• Could not submit"); } finally { window.setTimeout(() => setToast(""), 2200); } }
+  async function buyYes() { if (!session || !current) return; const target = current; advance(); try { const result = await api.swipe(session, target.slotId, String(Math.round(Number(amount) * 1_000_000))); setToast(result.created ? "✓ Market opened + YES submitted" : "✓ YES submitted"); refresh(); } catch (error) { setToast(error instanceof Error ? error.message : "The bet could not be submitted."); } finally { window.setTimeout(() => setToast(""), 4200); } }
   async function favorite() { if (!session || !current?.address) return; try { await api.favorite(session, current.address); setToast("Saved"); window.setTimeout(() => setToast(""), 1600); } catch { setToast("Could not save"); } }
   if (!session || view === "landing") return <Login onSession={setNewSession} />;
   if (view === "warning") return <Warning acknowledge={() => { localStorage.setItem("arctick-warning", "1"); setView("feed"); }} />;

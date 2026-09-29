@@ -12,7 +12,7 @@
     "keeper:stop": "node --import tsx services/keeper-stop.ts",
     "api": "node --import tsx services/start-api.mjs",
     "build:web": "npm --prefix web run build",
-    "test:services": "node --import tsx --test services/internal-auth.test.ts services/keeper-permissions.test.ts services/network-guard.test.ts",
+    "test:services": "node --import tsx --test services/internal-auth.test.ts services/keeper-permissions.test.ts services/network-guard.test.ts services/tx-diagnostics.test.ts",
     "test:api": "tsx services/api-smoke.ts",
     "typecheck": "tsc --noEmit"
   },
