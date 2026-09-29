@@ -6,13 +6,13 @@ import { privateKeyToAccount } from "viem/accounts";
 import { factoryAbi, marketAbi, vaultAbi } from "./abi.js";
 import { evaluateChainStatus, expectedChainId } from "./network-guard.js";
 
-const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return value; };
+const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error(`Missing ${name}`); return value; };
 const rpc = required("ARC_RPC_URL");
 const chainId = Number(required("ARC_CHAIN_ID"));
 const factory = required("FACTORY_ADDRESS") as Address;
 const vault = required("VAULT_ADDRESS") as Address;
 const dryRun = process.env.KEEPER_DRY_RUN === "true";
-const marketListTimeoutMs = Number(process.env.KEEPER_MARKET_LIST_TIMEOUT_MS ?? "60000");
+const marketListTimeoutMs = Number(process.env.KEEPER_MARKET_LIST_TIMEOUT_MS?.trim() || "60000");
 const settlementUrl = dryRun ? process.env.SETTLEMENT_API_URL : required("SETTLEMENT_API_URL");
 const settlementSecret = dryRun ? process.env.INTERNAL_KEEPER_SECRET : required("INTERNAL_KEEPER_SECRET");
 const account = dryRun ? undefined : privateKeyToAccount(required("KEEPER_PRIVATE_KEY") as `0x${string}`);
@@ -63,7 +63,7 @@ catch (error) {
   throw error;
 }
 
-const pidFile = resolve(process.env.KEEPER_PID_FILE ?? "run/keeper.pid");
+const pidFile = resolve(process.env.KEEPER_PID_FILE?.trim() || "run/keeper.pid");
 function isPidLive(pid: number) {
   try { process.kill(pid, 0); return true; }
   catch (error: unknown) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
@@ -94,7 +94,7 @@ function releasePidLock() {
 acquirePidLock();
 log("keeper_starting", { pid: process.pid, pidFile });
 
-const shutdownGraceMs = Number(process.env.KEEPER_SHUTDOWN_GRACE_MS ?? "30000");
+const shutdownGraceMs = Number(process.env.KEEPER_SHUTDOWN_GRACE_MS?.trim() || "30000");
 
 async function send(request: Parameters<NonNullable<typeof walletClient>["writeContract"]>[0], action: string) {
   if (!walletClient) throw new Error("Transaction signer is unavailable in dry-run mode");
@@ -119,7 +119,7 @@ async function requestSettlement(market: Address) {
 }
 
 async function loadMarkets(): Promise<Address[]> {
-  const managedMarkets = (process.env.KEEPER_MANAGED_MARKETS ?? "").split(",").map(value => value.trim()).filter(Boolean) as Address[];
+  const managedMarkets = (process.env.KEEPER_MANAGED_MARKETS?.trim() || "").split(",").map(value => value.trim()).filter(Boolean) as Address[];
   if (managedMarkets.length > 0) return managedMarkets;
 
   const load = async () => {
@@ -278,7 +278,7 @@ if (process.env.KEEPER_RUN_ONCE === "true") {
     log("keeper_stopped", { pid: process.pid });
   }
 } else {
-  const interval = Number(process.env.KEEPER_POLL_MS ?? 15_000);
+  const interval = Number(process.env.KEEPER_POLL_MS?.trim() || 15_000);
   let tickRunning = false;
   let stopping = false;
   async function runTick() {

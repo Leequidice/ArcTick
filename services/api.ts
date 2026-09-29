@@ -14,11 +14,11 @@ import { isValidInternalSecret } from "./internal-auth.js";
 import { safeTransactionError, transactionFailureCode, transactionFailureMessage, type TransactionStage } from "./tx-diagnostics.js";
 import { consumeWalletNonce, createGoogleUser, getOrCreateConnectedUser, getUserByAddress, getUserByGoogleSub, getUserById, initializeDatabase, pool, setWalletNonce, withOperatorTransactionLock, type User } from "./database.js";
 
-const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return value; };
+const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error(`Missing ${name}`); return value; };
 const rpc = required("ARC_RPC_URL");
 const vault = required("VAULT_ADDRESS") as Address;
 const factory = required("FACTORY_ADDRESS") as Address;
-const usdc = (process.env.USDC_ADDRESS ?? "0x3600000000000000000000000000000000000000") as Address;
+const usdc = (process.env.USDC_ADDRESS?.trim() || "0x3600000000000000000000000000000000000000") as Address;
 const operator = privateKeyToAccount(required("API_OPERATOR_PRIVATE_KEY") as `0x${string}`);
 const jwtSecret = new TextEncoder().encode(required("JWT_SECRET"));
 const masterKey = scryptSync(required("WALLET_MASTER_SECRET"), "arctick-wallet-v1", 32);
@@ -73,7 +73,7 @@ export const app = express();
 // Apply CORS before body parsing so client-visible error responses retain the
 // same headers as successful auth responses.
 app.use((_req, res, next) => {
-  const webOrigin = process.env.WEB_ORIGIN ?? (process.env.NODE_ENV === "production" ? undefined : "http://localhost:5173");
+  const webOrigin = process.env.WEB_ORIGIN?.trim() || (process.env.NODE_ENV === "production" ? undefined : "http://localhost:5173");
   if (webOrigin) res.setHeader("Access-Control-Allow-Origin", webOrigin);
   res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -91,6 +91,7 @@ app.use(async (req, res, next) => {
 app.get("/health", async (_req, res) => {
   const status = await getNetworkStatus();
   await logNetworkStatus(status);
+  console.warn(JSON.stringify({ service: "api", action: "temporary_usdc_config_check", usdcAddress: usdc }));
   // This is the public address only; never expose API_OPERATOR_PRIVATE_KEY.
   // It lets operators verify which signer the deployed environment loaded.
   res.json({ status: status.matchesExpected ? "ok" : "misconfigured_network", expectedChainId: status.expectedChainId, actualChainId: status.actualChainId, matchesExpected: status.matchesExpected, rpcHostname: rpcHostname(), apiSignerAddress: operator.address });
@@ -141,7 +142,7 @@ app.post("/settle", async (req, res) => {
 });
 
 type Comment = { id: string; userId: string; address: string; text: string; createdAt: string };
-const marketCacheTtlMs = Number(process.env.MARKETS_CACHE_TTL_MS ?? 4_000);
+const marketCacheTtlMs = Number(process.env.MARKETS_CACHE_TTL_MS?.trim() || 4_000);
 const multicall3Address = "0xca11bde05977b3631167028862be2a173976ca11" as Address;
 let marketCache: { expiresAt: number; value: unknown } | undefined;
 let marketCachePending: Promise<unknown> | undefined;

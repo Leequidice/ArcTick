@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 
-const pidFile = resolve(process.env.KEEPER_PID_FILE ?? "run/keeper.pid");
+const pidFile = resolve(process.env.KEEPER_PID_FILE?.trim() || "run/keeper.pid");
 if (!existsSync(pidFile)) {
   console.log("keeper not running (no PID file)");
   process.exit(0);

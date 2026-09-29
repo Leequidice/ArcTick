@@ -1,6 +1,6 @@
 // Kubeletto supplies PORT=8080. Preserve the local API_PORT fallback for
 // development, but let the hosting platform's assigned port take precedence.
-process.env.API_PORT = process.env.PORT ?? process.env.API_PORT ?? "8080";
+process.env.API_PORT = process.env.PORT?.trim() || process.env.API_PORT?.trim() || "8080";
 
 const { app, initializeApi } = await import("./api.ts");
 const { pool } = await import("./database.ts");

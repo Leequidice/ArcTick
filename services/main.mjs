@@ -1,6 +1,6 @@
 // Single-process entrypoint for hosts that allow only one ArcTick app.
 // Set the platform-assigned listener port before loading either service.
-process.env.API_PORT = process.env.PORT ?? process.env.API_PORT ?? "8080";
+process.env.API_PORT = process.env.PORT?.trim() || process.env.API_PORT?.trim() || "8080";
 process.env.ARCTICK_EMBEDDED = "true";
 
 // Importing starts the API listener, then the keeper poll loop in this same
