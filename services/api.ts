@@ -91,10 +91,9 @@ app.use(async (req, res, next) => {
 app.get("/health", async (_req, res) => {
   const status = await getNetworkStatus();
   await logNetworkStatus(status);
-  console.warn(JSON.stringify({ service: "api", action: "temporary_usdc_config_check", usdcAddress: usdc }));
   // This is the public address only; never expose API_OPERATOR_PRIVATE_KEY.
   // It lets operators verify which signer the deployed environment loaded.
-  res.json({ status: status.matchesExpected ? "ok" : "misconfigured_network", expectedChainId: status.expectedChainId, actualChainId: status.actualChainId, matchesExpected: status.matchesExpected, rpcHostname: rpcHostname(), apiSignerAddress: operator.address });
+  res.json({ status: status.matchesExpected ? "ok" : "misconfigured_network", expectedChainId: status.expectedChainId, actualChainId: status.actualChainId, matchesExpected: status.matchesExpected, rpcHostname: rpcHostname(), apiSignerAddress: operator.address, usdcAddress: usdc });
 });
 
 // Keeper-to-API channel only. This credential is separate from user JWTs and
