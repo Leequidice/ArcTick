@@ -6,10 +6,29 @@ const configuredApiUrl = import.meta.env.DEV ? import.meta.env.VITE_API_URL?.tri
 const configuredApiBase = configuredApiUrl ? configuredApiUrl.replace(/\/$/, "") : (import.meta.env.DEV ? "http://localhost:3001" : "");
 const apiPath = (path: string) => `${configuredApiUrl ? "" : import.meta.env.DEV ? "" : "/api"}${path}`;
 export const apiUrl = configuredApiBase || "/api";
+
+type ApiErrorBody = { message?: unknown; error?: unknown; diagnosticId?: unknown };
+
+export class ApiRequestError extends Error {
+  readonly diagnosticId?: string;
+
+  constructor(message: string, diagnosticId?: string) {
+    super(diagnosticId ? `${message} (Diagnostic reference: ${diagnosticId})` : message);
+    this.name = "ApiRequestError";
+    this.diagnosticId = diagnosticId;
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}, session?: Session): Promise<T> {
   try {
     const response = await fetch(`${configuredApiBase}${apiPath(path)}`, { ...init, headers: { "content-type": "application/json", ...(session ? { authorization: `Bearer ${session.token}` } : {}), ...init.headers } });
-    const body = await response.json(); if (!response.ok) throw new Error(body.message || body.error || "Request failed"); return body;
+    const body = await response.json() as ApiErrorBody;
+    if (!response.ok) {
+      const message = typeof body.message === "string" ? body.message : typeof body.error === "string" ? body.error : "Request failed";
+      const diagnosticId = typeof body.diagnosticId === "string" ? body.diagnosticId : undefined;
+      throw new ApiRequestError(message, diagnosticId);
+    }
+    return body as T;
   } catch (error) {
     console.error("ArcTick API request failed", { path, apiUrl, error });
     throw error;
