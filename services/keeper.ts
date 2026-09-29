@@ -43,6 +43,14 @@ async function verifyConfiguredNetwork() {
     log("network_mismatch", status);
     throw new Error(`misconfigured_network: expected chain ${expectedNetworkId}, configured ${chainId}, RPC reports ${actualChainId}`);
   }
+  // Fail closed if Arc's canonical Multicall3 deployment is unavailable. The
+  // keeper relies on it to scan the factory without issuing one RPC request
+  // per market.
+  const multicallCode = await publicClient.getBytecode({ address: multicall3Address });
+  if (!multicallCode || multicallCode === "0x") {
+    throw new Error(`multicall_unavailable: no bytecode at ${multicall3Address} on chain ${actualChainId}`);
+  }
+  log("multicall_verified", { address: multicall3Address, bytecodeBytes: (multicallCode.length - 2) / 2 });
   log("network_verified", status);
 }
 
@@ -116,9 +124,37 @@ async function loadMarkets(): Promise<Address[]> {
 
   const load = async () => {
     const count = await publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "marketCount" });
-    return Promise.all(Array.from({ length: Number(count) }, (_, i) =>
-      publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "markets", args: [BigInt(i)] })
-    ));
+    const total = Number(count);
+    const addresses: Address[] = [];
+    // A bounded number of Multicall3 eth_call round-trips replaces N parallel
+    // direct RPC requests. Sequential chunks keep response sizes predictable
+    // for providers with conservative request limits.
+    const batchSize = 40;
+    for (let offset = 0; offset < total; offset += batchSize) {
+      const size = Math.min(batchSize, total - offset);
+      const contracts = Array.from({ length: size }, (_, index) => ({
+        address: factory,
+        abi: factoryAbi,
+        functionName: "markets" as const,
+        args: [BigInt(offset + index)] as const
+      }));
+      const results = await publicClient.multicall({
+        contracts,
+        allowFailure: true,
+        multicallAddress: multicall3Address
+      }) as unknown as BatchOutcome<unknown>[];
+      const failedIndex = results.findIndex(result => result?.status !== "success");
+      if (failedIndex >= 0) {
+        const result = results[failedIndex];
+        throw new Error(`market_list_batch_failed at index ${offset + failedIndex}: ${result?.status === "failure" ? String(result.error) : "missing_multicall_result"}`);
+      }
+      for (const result of results) {
+        if (result.status !== "success") throw new Error(`market_list_batch_failed at index ${offset}: ${String(result.error)}`);
+        addresses.push(result.result as Address);
+      }
+      log("market_list_batch_loaded", { offset, batchSize: size, loaded: addresses.length, total });
+    }
+    return addresses;
   };
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
