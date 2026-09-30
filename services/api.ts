@@ -386,14 +386,15 @@ app.get("/positions", auth, async (_req, res) => {
     for (let start = 0; start < userPositions.length; start += 10) {
       const batch = userPositions.slice(start, start + 10);
       const metadata = await Promise.all(batch.map(async position => {
-        const [assetPair, duration, endTime, resolved, settled] = await Promise.all([
+        const [assetPair, startTime, endTime, resolved, settled] = await Promise.all([
           publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "assetPair" }),
-          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "duration" }),
+          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "startTime" }),
           publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "endTime" }),
           publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "resolved" }),
           publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "marketSettled", args: [position.market] })
         ]);
         const status = settled ? "settled" : resolved ? "resolved" : endTime > BigInt(now) ? "open" : "awaiting_resolution";
+        const duration = endTime - startTime;
         return { ...position, assetPair, duration: duration.toString(), endTime: endTime.toString(), status,
           timeRemaining: status === "open" ? Number(endTime) - now : 0 };
       }));
