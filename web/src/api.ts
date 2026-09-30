@@ -36,7 +36,7 @@ async function request<T>(path: string, init: RequestInit = {}, session?: Sessio
 }
 export const getMarkets = () => request<{ markets: Market[] }>("/markets");
 export const getBalance = (session: Session) => request<{ address: string; balance: string; decimals: number }>("/balance", {}, session);
-export const swipe = (session: Session, slotId: string, amount: string) => request<{ transactionHash: string; marketAddress: string; created: boolean }>("/swipe", { method: "POST", body: JSON.stringify({ slotId, isYes: true, amount }) }, session);
+export const swipe = (session: Session, slotId: string, amount: string, isYes: boolean) => request<{ transactionHash: string; marketAddress: string; created: boolean }>("/swipe", { method: "POST", body: JSON.stringify({ slotId, isYes, amount }) }, session);
 export const getPositions = (session: Session) => request<{ positions: Position[] }>("/positions", {}, session);
 export const deposit = (session: Session, amount: string) => request<{ transactionHash?: string; transactions?: { to: string; data: string }[] }>("/deposit", { method: "POST", body: JSON.stringify({ amount }) }, session);
 export const withdraw = (session: Session, amount: string) => request<{ transactionHash?: string; transaction?: { to: string; data: string } }>("/withdraw", { method: "POST", body: JSON.stringify({ amount }) }, session);
