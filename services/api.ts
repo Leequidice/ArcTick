@@ -353,17 +353,8 @@ app.get("/markets", async (_req, res) => { try { res.json(await openMarkets()); 
 app.get("/positions", auth, async (_req, res) => {
   try {
     const user: User = res.locals.user;
-    const total = await publicClient.readContract({ address: factory, abi: factoryAbi, functionName: "marketCount" });
-    const addresses: Address[] = [];
-    for (let start = 0n; start < total; start += 80n) {
-      const indices = Array.from({ length: Number(total - start > 80n ? 80n : total - start) }, (_, i) => start + BigInt(i));
-      const results = await publicClient.multicall({
-        contracts: indices.map(index => ({ address: factory, abi: factoryAbi, functionName: "markets" as const, args: [index] as const })),
-        allowFailure: true,
-        multicallAddress: multicall3Address
-      });
-      for (const result of results) if (result.status === "success") addresses.push(result.result);
-    }
+    const txHashes = await getPositionTransactionHashes(user.id);
+    const addresses = [...new Set([...txHashes.keys()].map(key => key.slice(0, key.lastIndexOf(":"))))] as Address[];
 
     const userPositions: { market: Address; yesStake: bigint; noStake: bigint }[] = [];
     for (let start = 0; start < addresses.length; start += 80) {
@@ -380,7 +371,6 @@ app.get("/positions", auth, async (_req, res) => {
       });
     }
 
-    const txHashes = await getPositionTransactionHashes(user.id);
     const now = Math.floor(Date.now() / 1000);
     const positions = [];
     for (let start = 0; start < userPositions.length; start += 10) {
