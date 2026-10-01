@@ -385,19 +385,30 @@ app.get("/positions", auth, async (_req, res) => {
     const positions = [];
     for (let start = 0; start < userPositions.length; start += 10) {
       const batch = userPositions.slice(start, start + 10);
-      const metadata = await Promise.all(batch.map(async position => {
-        const [assetPair, startTime, endTime, resolved, settled] = await Promise.all([
-          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "assetPair" }),
-          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "startTime" }),
-          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "endTime" }),
-          publicClient.readContract({ address: position.market, abi: marketAbi, functionName: "resolved" }),
-          publicClient.readContract({ address: vault, abi: vaultAbi, functionName: "marketSettled", args: [position.market] })
-        ]);
+      const metadataResults = await publicClient.multicall({
+        contracts: batch.flatMap(position => [
+          { address: position.market, abi: marketAbi, functionName: "assetPair" as const },
+          { address: position.market, abi: marketAbi, functionName: "startTime" as const },
+          { address: position.market, abi: marketAbi, functionName: "endTime" as const },
+          { address: position.market, abi: marketAbi, functionName: "resolved" as const },
+          { address: vault, abi: vaultAbi, functionName: "marketSettled" as const, args: [position.market] as const }
+        ]),
+        allowFailure: true,
+        multicallAddress: multicall3Address
+      });
+      const metadata = batch.flatMap((position, index) => {
+        const offset = index * 5;
+        const results = metadataResults.slice(offset, offset + 5);
+        if (results.some(result => result.status !== "success")) {
+          console.warn(JSON.stringify({ service: "api", action: "position_metadata_read_failed", market: position.market }));
+          return [];
+        }
+        const [assetPair, startTime, endTime, resolved, settled] = results.map(result => result.result) as [string, bigint, bigint, boolean, boolean];
         const status = settled ? "settled" : resolved ? "resolved" : endTime > BigInt(now) ? "open" : "awaiting_resolution";
         const duration = endTime - startTime;
         return { ...position, assetPair, duration: duration.toString(), endTime: endTime.toString(), status,
           timeRemaining: status === "open" ? Number(endTime) - now : 0 };
-      }));
+      });
       for (const position of metadata) {
         if (position.yesStake > 0n) positions.push({ marketAddress: position.market, assetPair: position.assetPair, duration: position.duration, side: "YES", amount: position.yesStake.toString(), status: position.status, timeRemaining: position.timeRemaining, transactionHash: txHashes.get(`${position.market.toLowerCase()}:YES`) ?? null });
         if (position.noStake > 0n) positions.push({ marketAddress: position.market, assetPair: position.assetPair, duration: position.duration, side: "NO", amount: position.noStake.toString(), status: position.status, timeRemaining: position.timeRemaining, transactionHash: txHashes.get(`${position.market.toLowerCase()}:NO`) ?? null });
