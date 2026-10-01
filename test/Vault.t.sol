@@ -62,6 +62,31 @@ contract VaultTest is Test {
         assertEq(vault.balances(bob), 0);
     }
 
+    function testNoBetWinsOnPriceDropWithBothPoolsFunded() public {
+        _deposit(alice, 100 * UNIT);
+        _deposit(bob, 100 * UNIT);
+        BinaryMarket market = _market();
+        vm.prank(operator); vault.operatorPlaceBet(alice, address(market), true, 100 * UNIT);
+        vm.prank(operator); vault.operatorPlaceBet(bob, address(market), false, 100 * UNIT);
+
+        (uint256 yesPool, uint256 noPool) = market.getPoolSizes();
+        assertEq(yesPool, 100 * UNIT);
+        assertEq(noPool, 100 * UNIT);
+
+        feed.setAnswer(99e8);
+        vm.warp(market.endTime());
+        market.resolve();
+        assertTrue(market.resolved());
+        assertFalse(market.refunded());
+        assertFalse(market.yesWon());
+        assertEq(market.commissionPaid(), 2 * UNIT);
+        assertEq(usdc.balanceOf(market.treasury()), 2 * UNIT);
+
+        vm.prank(operator); vault.operatorSettleMarket(address(market));
+        assertEq(vault.balances(alice), 0);
+        assertEq(vault.balances(bob), 198 * UNIT);
+    }
+
     function testRefundedMarketCreditsEveryone() public {
         _deposit(alice, 100 * UNIT);
         _deposit(bob, 100 * UNIT);
