@@ -17,5 +17,8 @@
 @media (max-width: 400px) { .header-actions { gap: 4px; } .positions-button { font-size: .68rem; } .balance { padding: 7px 8px; } }
 .card-bottom > span small { display: block; color: #77808d; font-size: .65rem; margin-top: 4px; }
 .card-controls { display: flex; align-items: center; gap: 10px; }
+.card-utility-actions { display: grid; justify-items: center; gap: 2px; }
 .card-controls button.pass-button { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid #505867; border-radius: 50%; color: #b6bdc7; font-size: 1.2rem; line-height: 1; }
 .card-controls button.pass-button:disabled { opacity: .45; cursor: not-allowed; }
+.card-controls button.undo-skip-button { display: grid; place-items: center; width: 26px; height: 22px; border: 0; border-radius: 8px; color: #9aa3b1; font-size: .95rem; line-height: 1; }
+.card-controls button.undo-skip-button:disabled { opacity: .28; cursor: not-allowed; }

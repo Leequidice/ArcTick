@@ -1,6 +1,7 @@
 import { AnimatePresence, motion, useAnimation } from "framer-motion";
 import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api";
+import { findSlotIndex, mergeMarketSnapshot, nextFeedIndex, rememberSkippedSlot, uniqueMarketSnapshot } from "./feed-state";
 import type { Comment, Market, Position, Session } from "./types";
 import "./positions.css";
 
@@ -59,18 +60,34 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
 
 function Warning({ acknowledge }: { acknowledge: () => void }) { return <main className="screen"><div className="panel warning"><p className="eyebrow">ONE IMPORTANT THING</p><h1>Keep this browser data.</h1><p>Your ArcTick wallet is stored securely for this browser session. If you clear this browser’s storage or cache, you may lose access to this wallet and its funds.</p><p>Save your wallet address somewhere safe and only use devices you trust.</p><button className="button primary" onClick={acknowledge}>I understand</button></div></main>; }
 
-function MarketCard({ market, amount, onYes, onNo, onSkip, onOpen, onComments, onFavorite }: { market: Market; amount: string; onYes: () => void; onNo: () => void; onSkip: () => void; onOpen: () => void; onComments: () => void; onFavorite: () => void }) {
-  const controls = useAnimation(); const started = useRef(0); const lastTap = useRef(0);
+function MarketCard({ market, amount, canUndoSkip, onYes, onNo, onSkip, onUndoSkip, onOpen, onComments, onFavorite }: { market: Market; amount: string; canUndoSkip: boolean; onYes: () => void; onNo: () => void; onSkip: () => void; onUndoSkip: () => void; onOpen: () => void; onComments: () => void; onFavorite: () => void }) {
+  const controls = useAnimation(); const started = useRef(0); const lastTap = useRef(0); const gestureStart = useRef<{ x: number; y: number } | null>(null); const verticalSkipHandled = useRef(false);
   const [remaining, setRemaining] = useState(market.kind === "live" ? Math.max(0, Number(market.endTime) - Math.floor(Date.now() / 1000)) : 0);
   useEffect(() => { if (market.kind === "virtual") return; const timer = window.setInterval(() => setRemaining(Math.max(0, Number(market.endTime) - Math.floor(Date.now() / 1000))), 1000); return () => clearInterval(timer); }, [market.kind, market.endTime]);
   async function dismiss(side: "yes" | "no" | "pass") { if (market.status === "unavailable") return; await controls.start(side === "pass" ? { y: -40, scale: 0.96, opacity: 0, transition: { duration: 0.2 } } : { x: side === "yes" ? 520 : -520, rotate: side === "yes" ? 12 : -12, opacity: 0, transition: { duration: 0.22 } }); if (side === "yes") onYes(); else if (side === "no") onNo(); else onSkip(); }
-  function pointerDown(event: ReactPointerEvent) { if ((event.target as HTMLElement).closest("button")) return; started.current = Date.now(); }
-  function pointerUp(event: ReactPointerEvent) { if ((event.target as HTMLElement).closest("button") || Date.now() - started.current > 230) return; const now = Date.now(); if (now - lastTap.current < 280) { onFavorite(); lastTap.current = 0; } else { lastTap.current = now; window.setTimeout(() => { if (lastTap.current === now) onOpen(); }, 290); } }
-  return <motion.article className="market-card" drag={market.status === "unavailable" ? false : "x"} dragConstraints={{ left: 0, right: 0 }} dragElastic={0.15} animate={controls} onPointerDown={pointerDown} onPointerUp={pointerUp} onDragEnd={(_, info) => { if (info.offset.x > 110) dismiss("yes"); else if (info.offset.x < -110) dismiss("no"); else controls.start({ x: 0 }); }}>
+  function pointerDown(event: ReactPointerEvent) { if ((event.target as HTMLElement).closest("button")) return; verticalSkipHandled.current = false; gestureStart.current = { x: event.clientX, y: event.clientY }; started.current = Date.now(); }
+  function pointerUp(event: ReactPointerEvent) {
+    if ((event.target as HTMLElement).closest("button")) { gestureStart.current = null; return; }
+    const start = gestureStart.current;
+    gestureStart.current = null;
+    if (start) {
+      const deltaX = event.clientX - start.x;
+      const deltaY = event.clientY - start.y;
+      if (deltaY < -85 && Math.abs(deltaY) > Math.abs(deltaX) * 1.15) {
+        verticalSkipHandled.current = true;
+        void dismiss("pass");
+        return;
+      }
+      if (Math.abs(deltaX) > 8 || Math.abs(deltaY) > 8) return;
+    }
+    if (Date.now() - started.current > 230) return;
+    const now = Date.now(); if (now - lastTap.current < 280) { onFavorite(); lastTap.current = 0; } else { lastTap.current = now; window.setTimeout(() => { if (lastTap.current === now) onOpen(); }, 290); }
+  }
+  return <motion.article className="market-card" drag={market.status === "unavailable" ? false : true} dragConstraints={{ left: 0, right: 0, top: 0, bottom: 0 }} dragElastic={0.15} animate={controls} onPointerDown={pointerDown} onPointerUp={pointerUp} onDragEnd={(_, info) => { if (verticalSkipHandled.current) { verticalSkipHandled.current = false; return; } if (info.offset.x > 110) dismiss("yes"); else if (info.offset.x < -110) dismiss("no"); else controls.start({ x: 0, y: 0 }); }}>
     <div className="card-top"><span className="asset">{market.assetPair}</span><span className="live"><i /> {market.status === "unavailable" ? "UNAVAILABLE" : market.kind === "live" ? "LIVE" : "ON DEMAND"}</span></div>
     <div className="direction"><span>{market.status === "unavailable" ? "—" : "UP"}</span><p>{market.status === "unavailable" ? "Price data temporarily unavailable" : `Will ${market.assetPair.split("/")[0]} finish higher?`}</p></div>
     <div className="timer"><b>{market.kind === "live" ? clock(remaining) : market.status === "unavailable" ? "—" : "READY"}</b><span>{market.status === "unavailable" ? "This market can’t be opened right now" : market.kind === "live" ? `${timeframe(market.duration)} market` : `Runs ${timeframe(market.duration)} after opening`}</span></div>
-    <div className="card-bottom"><span>{market.status === "unavailable" ? "Temporarily unavailable" : <>Swipe right YES · left NO <small>{amount || "0"} USDC · tap × to pass</small></>}</span><div className="card-controls">{market.kind === "live" && market.address && <button aria-label="Open comments" onClick={event => { event.stopPropagation(); onComments(); }}>◌</button>}<button className="pass-button" aria-label="Pass on this market" title="Pass without betting" disabled={market.status === "unavailable"} onClick={event => { event.stopPropagation(); dismiss("pass"); }}>×</button></div></div>
+    <div className="card-bottom"><span>{market.status === "unavailable" ? "Temporarily unavailable" : <>Swipe right YES · left NO <small>{amount || "0"} USDC · swipe up or tap × to pass</small></>}</span><div className="card-controls">{market.kind === "live" && market.address && <button aria-label="Open comments" onClick={event => { event.stopPropagation(); onComments(); }}>◌</button>}<div className="card-utility-actions"><button className="pass-button" aria-label="Pass on this market" title="Pass without betting" disabled={market.status === "unavailable"} onClick={event => { event.stopPropagation(); dismiss("pass"); }}>×</button><button className="undo-skip-button" aria-label="Undo last skipped market" title="Undo last pass" disabled={!canUndoSkip} onClick={event => { event.stopPropagation(); onUndoSkip(); }}>↧</button></div></div></div>
   </motion.article>;
 }
 
@@ -117,13 +134,26 @@ function Funds({ mode, session, balance, close, refresh }: { mode: "deposit" | "
 export function App() {
   const [session, setSession] = useState<Session | undefined>(() => { const raw = localStorage.getItem("arctick-session"); return raw ? JSON.parse(raw) : undefined; });
   const [view, setView] = useState<View>(() => session?.custodial && !localStorage.getItem("arctick-warning") ? "warning" : session ? "feed" : "landing");
-  const [markets, setMarkets] = useState<Market[]>([]); const [index, setIndex] = useState(0); const [tab, setTab] = useState<"Trading" | "Prediction">("Trading"); const [amount, setAmount] = useState("1"); const [balance, setBalance] = useState("0"); const [detail, setDetail] = useState<Market>(); const [comments, setComments] = useState<(Market & { address: string })>(); const [toast, setToast] = useState(""); const [toastHash, setToastHash] = useState("");
+  const [markets, setMarkets] = useState<Market[]>([]); const [index, setIndex] = useState(0); const [skippedSlots, setSkippedSlots] = useState<string[]>([]); const [tab, setTab] = useState<"Trading" | "Prediction">("Trading"); const [amount, setAmount] = useState("1"); const [balance, setBalance] = useState("0"); const [detail, setDetail] = useState<Market>(); const [comments, setComments] = useState<(Market & { address: string })>(); const [toast, setToast] = useState(""); const [toastHash, setToastHash] = useState("");
+  const marketRequest = useRef<Promise<Market[]> | null>(null);
   const visibleMarkets = useMemo(() => markets.filter(market => tab === "Trading" ? market.duration !== "3600" : market.duration === "3600"), [markets, tab]);
   const current = visibleMarkets[index];
+  async function refreshMarketMatrix() {
+    if (marketRequest.current) return marketRequest.current;
+    const request = api.getMarkets().then(result => {
+      // The endpoint returns a finite pair/timeframe matrix. Keep one card per
+      // slot, refresh existing card data in place, and append newly introduced
+      // slots without replacing the active card (which avoids a feed flash).
+      const incoming = uniqueMarketSnapshot(result.markets);
+      setMarkets(previous => mergeMarketSnapshot(previous, incoming));
+      return incoming;
+    }).finally(() => { marketRequest.current = null; });
+    marketRequest.current = request;
+    return request;
+  }
   const refresh = async () => {
     try {
-      const result = await api.getMarkets();
-      setMarkets(result.markets);
+      await refreshMarketMatrix();
     } catch (error) {
       console.error("ArcTick markets refresh failed", error);
       setToast("Live markets are temporarily unavailable");
@@ -142,9 +172,32 @@ export function App() {
     }
   };
   useEffect(() => { if (!session || view !== "feed") return; refresh(); const timer = window.setInterval(refresh, 8_000); return () => clearInterval(timer); }, [session, view]);
+  useEffect(() => {
+    if (!session || view !== "feed" || visibleMarkets.length === 0) return;
+    if (index >= Math.max(0, visibleMarkets.length - 5)) void refreshMarketMatrix().catch(error => console.error("ArcTick feed preload failed", error));
+  }, [session, view, index, visibleMarkets.length]);
   function setNewSession(next: Session) { localStorage.setItem("arctick-session", JSON.stringify(next)); setSession(next); setView(next.custodial && !localStorage.getItem("arctick-warning") ? "warning" : "feed"); }
   function logout() { localStorage.removeItem("arctick-session"); setSession(undefined); setView("landing"); }
-  function advance() { setIndex(value => value + 1); }
+  function advance() { setIndex(value => nextFeedIndex(value, visibleMarkets.length)); }
+  function skipCurrent(slotId: string) { setSkippedSlots(previous => rememberSkippedSlot(previous, slotId)); advance(); }
+  async function undoSkip() {
+    const slotId = skippedSlots[skippedSlots.length - 1];
+    if (!slotId) return;
+    try {
+      // Always re-read before restoring: a virtual slot may have become live
+      // (or resolved) while it was in the in-memory undo stack.
+      const freshMarkets = await refreshMarketMatrix();
+      const freshVisible = freshMarkets.filter(market => tab === "Trading" ? market.duration !== "3600" : market.duration === "3600");
+      const restoredIndex = findSlotIndex(freshVisible, slotId);
+      if (restoredIndex < 0) throw new Error("That market is no longer available in the feed.");
+      setSkippedSlots(previous => previous.slice(0, -1));
+      setIndex(restoredIndex);
+    } catch (error) {
+      console.error("ArcTick skipped-market refresh failed", error);
+      setToast("Couldn’t refresh that market to undo the pass.");
+      window.setTimeout(() => setToast(current => current === "Couldn’t refresh that market to undo the pass." ? "" : current), 2200);
+    }
+  }
   async function placeBet(isYes: boolean) { if (!session || !current) return; const target = current; const side = isYes ? "YES" : "NO"; advance(); try { const result = await api.swipe(session, target.slotId, String(Math.round(Number(amount) * 1_000_000)), isYes); setToastHash(result.transactionHash); setToast(result.created ? `✓ Market opened + ${side} submitted` : `✓ ${side} submitted`); refresh(); } catch (error) { setToastHash(""); setToast(error instanceof Error ? error.message : "The bet could not be submitted."); } finally { window.setTimeout(() => { setToast(""); setToastHash(""); }, 4200); } }
   async function favorite() { if (!session || !current?.address) return; try { await api.favorite(session, current.address); setToast("Saved"); window.setTimeout(() => setToast(""), 1600); } catch { setToast("Could not save"); } }
   if (!session || view === "landing") return <Login onSession={setNewSession} />;
@@ -152,5 +205,5 @@ export function App() {
   if (view === "positions") return <Positions session={session} close={() => setView("feed")} />;
   if (view === "deposit" || view === "withdraw") return <Funds mode={view} session={session} balance={balance} close={() => setView("feed")} refresh={refresh} />;
   if (view === "how") return <HowItWorks close={() => setView("feed")} />;
-  return <main className="app"><header><div className="brand small">ARC<span>TICK</span></div><div className="header-actions"><button className="info" aria-label="How ArcTick works" onClick={() => setView("how")}>ⓘ</button><button className="positions-button" onClick={() => setView("positions")}>My positions</button><button className="balance" onClick={() => setView("withdraw")}>{usdc(balance)} <small>USDC</small></button><button className="logout" onClick={logout}>Log out</button></div></header><nav><button className={tab === "Trading" ? "active" : ""} onClick={() => { setTab("Trading"); setIndex(0); }}>Trading <small>Runs 5m or 15m after opening</small></button><button className={tab === "Prediction" ? "active" : ""} onClick={() => { setTab("Prediction"); setIndex(0); }}>Prediction <small>Runs 1h after opening</small></button></nav><section className="feed"><AnimatePresence mode="wait">{current ? <MarketCard key={current.slotId} market={current} amount={amount} onYes={() => void placeBet(true)} onNo={() => void placeBet(false)} onSkip={advance} onOpen={() => setDetail(current)} onComments={() => { if (current.address) setComments(current as Market & { address: string }); }} onFavorite={favorite} /> : <div className="empty"><h2>That’s the feed.</h2><p>Fresh markets will appear here shortly.</p><button className="button" onClick={() => { setIndex(0); refresh(); }}>Refresh</button></div>}</AnimatePresence></section><footer><label>Stake<input value={amount} onChange={event => setAmount(event.target.value)} inputMode="decimal" /> USDC</label><button onClick={() => setView("deposit")}>Deposit</button><span>← NO · <b>YES →</b></span></footer>{detail && <Detail market={detail} close={() => setDetail(undefined)} />}{comments && <Comments session={session} market={comments} close={() => setComments(undefined)} />}{toast && <div className="toast">{toast}{toastHash && toast.startsWith("✓") && <a className="toast-hash" href={`https://explorer.arc.io/tx/${toastHash}`} target="_blank" rel="noreferrer">{toastHash}</a>}</div>}</main>;
+  return <main className="app"><header><div className="brand small">ARC<span>TICK</span></div><div className="header-actions"><button className="info" aria-label="How ArcTick works" onClick={() => setView("how")}>ⓘ</button><button className="positions-button" onClick={() => setView("positions")}>My positions</button><button className="balance" onClick={() => setView("withdraw")}>{usdc(balance)} <small>USDC</small></button><button className="logout" onClick={logout}>Log out</button></div></header><nav><button className={tab === "Trading" ? "active" : ""} onClick={() => { setTab("Trading"); setIndex(0); }}>Trading <small>Runs 5m or 15m after opening</small></button><button className={tab === "Prediction" ? "active" : ""} onClick={() => { setTab("Prediction"); setIndex(0); }}>Prediction <small>Runs 1h after opening</small></button></nav><section className="feed"><AnimatePresence mode="wait">{current ? <MarketCard key={current.slotId} market={current} amount={amount} canUndoSkip={skippedSlots.length > 0} onYes={() => void placeBet(true)} onNo={() => void placeBet(false)} onSkip={() => skipCurrent(current.slotId)} onUndoSkip={() => void undoSkip()} onOpen={() => setDetail(current)} onComments={() => { if (current.address) setComments(current as Market & { address: string }); }} onFavorite={favorite} /> : <div className="empty"><h2>That’s the feed.</h2><p>Fresh markets will appear here shortly. The feed checks again automatically.</p></div>}</AnimatePresence></section><footer><label>Stake<input value={amount} onChange={event => setAmount(event.target.value)} inputMode="decimal" /> USDC</label><button onClick={() => setView("deposit")}>Deposit</button><span>← NO · <b>YES →</b></span></footer>{detail && <Detail market={detail} close={() => setDetail(undefined)} />}{comments && <Comments session={session} market={comments} close={() => setComments(undefined)} />}{toast && <div className="toast">{toast}{toastHash && toast.startsWith("✓") && <a className="toast-hash" href={`https://explorer.arc.io/tx/${toastHash}`} target="_blank" rel="noreferrer">{toastHash}</a>}</div>}</main>;
 }
